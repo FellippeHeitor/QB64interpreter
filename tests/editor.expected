@@ -1,0 +1,100 @@
+.NEW
+.LIST
+ 1 PRINT "hello"
+ 2 FOR i = 1 TO 3
+ 3 PRINT i
+ 4 NEXT
+End of file - 
+.RUN
+hello
+ 1 
+ 2 
+ 3 
+.EDIT
+.LIST
+ 1 PRINT "hello"
+ 2 FOR i = 1 TO 3
+ 3     PRINT i
+ 4 NEXT
+End of file - 
+.EDIT
+.LIST
+ 1 PRINT "hello"
+ 2 FOR i = 1 TO 3
+ 3 PRINT i
+ 4 NEXT
+End of file - 
+.EDIT
+editor: Search wrapped around
+editor: 2 replaced
+.LIST
+ 1 ?  "hello"
+ 2 FOR i = 1 TO 3
+ 3     ?  i
+ 4 NEXT
+End of file - 
+.EDIT
+.LIST
+ 1 ?  "hello"
+ 2 FOR i = 1 TO 3
+ 3     ?  i
+ 4 NEXT
+ 5 ?  "hello"
+ 6 FOR i = 1 TO 3
+ 7     ?  i
+ 8 NEXT
+End of file - 
+.EDIT 2
+.LIST
+ 1 ?  "hello"
+ 2 NEXT
+ 3     '?  i
+ 4 '?  "hello"
+ 5 'FOR i = 1 TO 3
+ 6     ?  i
+ 7 NEXT
+End of file - 
+.EDIT
+.LIST
+ 1 ?"x"
+ 2 x"
+ 3 NEXT?"
+ 4     '?  i
+ 5 '?  "hello"
+ 6 'FOR i = 1 TO 3
+ 7     ?  i
+ 8 NEXT
+End of file - 
+.EDIT
+-10 
+Division by zero on line 2 
+.EDIT
+editor: Division by zero on line 2
+.EDIT
+editor: Division by zero on line 2
+.LIST
+ 1 FOR i = 1 TO 2
+ 2 PRINT 10 / (i - 2)*
+ 3 NEXT
+End of file - 
+.EDIT
+editor: Saved tests/_editor_tmp.bas
+editor: Saved tests/_editor_tmp.bas
+.LOAD tests/_editor_tmp.bas
+Loaded.
+.LIST
+ 1 FOR i = 1 TO 2
+ 2 PRINT 10 / (i - 2)
+ 3 NEXT
+End of file - tests/_editor_tmp.bas
+.KILL "tests/_editor_tmp.bas"
+.EDIT
+editor: Not found: zzz
+editor: 0 replaced
+editor: Nothing to undo
+editor: Nothing to undo
+.LIST
+ 1 FOR i = 1 TO 2
+ 2 PRINT 10 / (i - 2)
+ 3 NEXT
+End of file - tests/_editor_tmp.bas

@@ -1,0 +1,37 @@
+NEW
+PRINT "hello"{enter}FOR i = 1 TO 3{enter}PRINT i{enter}NEXT{esc}
+LIST
+RUN
+EDIT
+{ctrl+home}{down}{down}{home}{tab}{esc}
+LIST
+EDIT
+{ctrl+z}{esc}
+LIST
+EDIT
+{ctrl+y}{ctrl+home}{ctrl+f}print{enter}{f3}{f3}{ctrl+h}PRINT{enter}? {enter}a{esc}
+LIST
+EDIT
+{ctrl+a}{ctrl+c}{ctrl+end}{enter}{ctrl+v}{esc}
+LIST
+EDIT 2
+{ctrl+k}{alt+down}{ctrl+/}{down}{shift+down}{shift+down}{ctrl+/}{esc}
+LIST
+EDIT
+{ctrl+g}1{enter}{end}{bksp}{bksp}{shift+home}?"x"{ctrl+d}{ctrl+left}{ctrl+left}{shift+ctrl+right}{ctrl+x}{down}{end}{ctrl+v}{esc}
+LIST
+EDIT
+{ctrl+a}{del}FOR i = 1 TO 2{enter}PRINT 10 / (i - 2){enter}NEXT{f5}
+EDIT
+{esc}
+EDIT
+{end}*{esc}
+LIST
+EDIT
+{ctrl+s}tests/_editor_tmp{enter}{ctrl+z}{ctrl+z}{ctrl+y}{ctrl+s}{esc}
+LOAD tests/_editor_tmp.bas
+LIST
+KILL "tests/_editor_tmp.bas"
+EDIT
+x{ctrl+f}zzz{enter}{ctrl+h}nope{enter}{enter}{ctrl+z}{ctrl+z}{ctrl+z}{esc}
+LIST

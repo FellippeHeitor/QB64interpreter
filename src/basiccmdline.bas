@@ -1,13 +1,15 @@
 OPTION _EXPLICIT
 
 $CONSOLE
+'the window starts hidden; it's only shown when not running headless (tests)
+$SCREENHIDE
 
 CONST true = -1, false = NOT true
 
 DIM SHARED debugging AS _BYTE
 debugging = false
 
-'$include:'qXed/qXed.bi'
+'$include:'editor.bi'
 '$include:'vars.bi'
 '$include:'eval.bi'
 '$include:'blocks.bi'
@@ -18,7 +20,7 @@ DIM SHARED currentLine AS LONG, lineThatErrored AS LONG
 DIM SHARED errorHappened AS _BYTE, lastErrorCode AS INTEGER, runtimeErr AS INTEGER
 DIM SHARED keyhit AS LONG, screenKeyStatus AS _BYTE
 DIM SHARED running AS _BYTE, loaded AS _BYTE, loadedFile$
-DIM SHARED loadedFileContents$, MyBad AS _BYTE
+DIM SHARED MyBad AS _BYTE
 DIM L$, L1$, temp$, saveFile$, k$, i AS LONG, j AS LONG
 DIM q AS STRING * 1
 
@@ -48,22 +50,20 @@ IF LCASE$(LEFT$(startFile$, 5)) = "-run " OR LCASE$(LEFT$(startFile$, 8)) = "-sc
         startFile$ = _TRIM$(MID$(startFile$, 6))
         IF LEFT$(startFile$, 1) = CHR$(34) THEN startFile$ = removeQuote$(startFile$)
     END IF
-    _SCREENHIDE
     _DEST _CONSOLE
 END IF
 
 IF headless THEN
-    'keep the console
+    'output stays in the console; the window is never shown
 ELSEIF debugging = false THEN
+    _SCREENSHOW
     _CONSOLE OFF
 ELSE
+    _SCREENSHOW
     _SCREENMOVE _SCREENX + 800, _SCREENY
 END IF
 
-KEY 2, "LIST" + CHR$(13)
-KEY 3, "LOAD " + CHR$(34)
-KEY 4, "SAVE " + CHR$(34)
-KEY 5, "RUN" + CHR$(13)
+setSoftKeys true
 KEY ON
 
 screenKeyStatus = true
@@ -224,6 +224,16 @@ DO
                 ELSE
                     PRINT "Invalid line number -"; j
                 END IF
+            ELSEIF LEFT$(L$, 5) = "EDIT " AND VAL(MID$(L$, 6)) > 0 THEN
+                'EDIT n opens the editor at line n
+                IF loaded THEN
+                    edLastFile$ = loadedFile$: edLastCY = VAL(MID$(L$, 6)): edLastCX = 1
+                    edLastTop = edLastCY - 10
+                    IF edLastCY > UBOUND(program) THEN edLastCY = UBOUND(program)
+                    editProgram
+                ELSE
+                    PRINT "No program loaded."
+                END IF
             ELSEIF LEFT$(L$, 7) = "DELETE " THEN
                 deleteLines MID$(L$, 8)
             ELSEIF LEN(L$) THEN
@@ -296,6 +306,7 @@ SUB saveProgram (f$)
     NEXT
     CLOSE ff
     loadedFile$ = f$
+    edSavedAt = edUndoN 'the editor shows the program as saved
     PRINT "Saved - "; loadedFile$
 END SUB
 
@@ -303,29 +314,25 @@ SUB newProgram (f$)
     loadedFile$ = f$
     loaded = true
     REDIM program(1) AS STRING
-    loadedFileContents$ = CHR$(10)
+    edForget
     editProgram
 END SUB
 
 SUB editProgram
-    'opens the program in qXed and reads it back
-    DIM a AS LONG, b AS LONG, n AS LONG
-    _KEYCLEAR
-    Editor
-    REDIM program(0) AS STRING
-    a = 1
-    DO
-        b = INSTR(a, loadedFileContents$, CHR$(10))
-        n = n + 1
-        REDIM _PRESERVE program(n) AS STRING
-        IF b = 0 THEN
-            program(n) = MID$(loadedFileContents$, a)
-            EXIT DO
-        END IF
-        program(n) = MID$(loadedFileContents$, a, b - a)
-        a = b + 1
-    LOOP
-    _KEYCLEAR
+    'opens the full-screen editor (editor.bm); F5 there runs the program
+    IF edRun% = 2 THEN runProgram
+END SUB
+
+SUB setSoftKeys (enable AS _BYTE)
+    'F2-F5 type commands at the prompt; the editor uses those keys itself
+    IF enable THEN
+        KEY 2, "LIST" + CHR$(13)
+        KEY 3, "LOAD " + CHR$(34)
+        KEY 4, "SAVE " + CHR$(34)
+        KEY 5, "RUN" + CHR$(13)
+    ELSE
+        KEY 2, "": KEY 3, "": KEY 4, "": KEY 5, ""
+    END IF
 END SUB
 
 SUB deleteLines (range$)
@@ -361,10 +368,11 @@ SUB listProgram (pause AS _BYTE)
     maxSpaceBefore = LEN(STR$(UBOUND(program))) + 1
 
     MyBad = true
-    COLOR , 0
+    IF NOT headless THEN COLOR , 0
     FOR i = 1 TO UBOUND(program)
         num$ = STR$(i)
         num$ = SPACE$(maxSpaceBefore - LEN(num$) - 1) + num$ + " "
+        IF headless THEN PRINT num$; program(i): _CONTINUE
         COLOR 8
         PRINT num$;
         COLOR 7
@@ -384,7 +392,7 @@ SUB listProgram (pause AS _BYTE)
             _KEYCLEAR
         END IF
     NEXT
-    COLOR prevFG, prevBG
+    IF NOT headless THEN COLOR prevFG, prevBG
     MyBad = false
     PRINT "End of file - "; loadedFile$
 END SUB
@@ -423,20 +431,18 @@ FUNCTION load%% (file$)
     ff = FREEFILE
     OPEN file$ FOR BINARY AS ff
     REDIM program(0) AS STRING
-    loadedFileContents$ = ""
     DO
         IF EOF(ff) THEN EXIT DO
         LINE INPUT #ff, l$
         n = n + 1
         IF n > UBOUND(program) THEN REDIM _PRESERVE program(n + 999) AS STRING
         program(n) = l$
-        IF n > 1 THEN loadedFileContents$ = loadedFileContents$ + CHR$(10)
-        loadedFileContents$ = loadedFileContents$ + l$
     LOOP
     CLOSE ff
 
     IF n > 0 THEN
         REDIM _PRESERVE program(n) AS STRING
+        edForget
         load%% = true
         loadedFile$ = file$
     END IF
@@ -454,6 +460,7 @@ END SUB
 
 SUB throwErrorMsg (msg$)
     IF errorHappened THEN EXIT SUB 'one message per statement
+    lastErrorMsg$ = msg$
     PRINT msg$;
     IF running AND NOT immediateRun AND currentLine > 0 THEN
         PRINT " on line"; currentLine
@@ -609,4 +616,4 @@ END FUNCTION
 '$include:'blocks.bm'
 '$include:'exec.bm'
 '$include:'stmts.bm'
-'$include:'qXed/qXed.bm'
+'$include:'editor.bm'
