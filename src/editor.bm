@@ -1158,6 +1158,56 @@ SUB edWordAt
 END SUB
 
 '---------------------------------------------------------------- drawing
+SUB printCode (s$)
+    'prints a line of code in syntax colours, without a newline (used by LIST)
+    DIM c$, i AS LONG, j AS LONG
+    IF headless THEN PRINT s$;: EXIT SUB
+    c$ = edColors$(s$)
+    i = 1
+    DO WHILE i <= LEN(s$)
+        j = i
+        DO WHILE j < LEN(s$)
+            IF ASC(c$, j + 1) <> ASC(c$, i) THEN EXIT DO
+            j = j + 1
+        LOOP
+        codeColor ASC(c$, i)
+        PRINT MID$(s$, i, j - i + 1);
+        i = j + 1
+    LOOP
+    codeColor EC_TEXT
+END SUB
+
+SUB codeColor (slot AS INTEGER)
+    'the editor's colours on whatever screen the prompt is using
+    DIM c AS _UNSIGNED LONG, p AS _UNSIGNED LONG
+    p = edPal(slot)
+    SELECT CASE _PIXELSIZE(_DEST)
+        CASE 4 'exact colours
+            COLOR p
+        CASE 0 'text mode: the standard 16 colours
+            SELECT CASE slot
+                CASE EC_KEYWORD: COLOR 11
+                CASE EC_NUMBER: COLOR 12
+                CASE EC_STRING: COLOR 14
+                CASE EC_COMMENT: COLOR 3
+                CASE EC_META: COLOR 10
+                CASE EC_LABEL: COLOR 15
+                CASE EC_GUTTER: COLOR 8
+                CASE ELSE: COLOR 7
+            END SELECT
+        CASE ELSE 'palette graphics: the nearest colour the screen has
+            c = _RGB(_RED32(p), _GREEN32(p), _BLUE32(p))
+            IF c = _BACKGROUNDCOLOR THEN c = _RGB(255, 255, 255)
+            IF c = _BACKGROUNDCOLOR THEN c = _RGB(0, 0, 0)
+            COLOR c
+    END SELECT
+END SUB
+
+SUB codeBackground
+    'a solid dark background so the colours show on any screen
+    IF _PIXELSIZE(_DEST) = 4 THEN COLOR , _RGB32(0, 0, 0) ELSE COLOR , _RGB(0, 0, 0)
+END SUB
+
 SUB edSetPalette
     edPal(EC_BG) = _RGB32(0, 0, 39)
     edPal(EC_CURLINE) = _RGB32(0, 40, 70)

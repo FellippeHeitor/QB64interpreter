@@ -23,7 +23,7 @@ DIM SHARED currentLine AS LONG, lineThatErrored AS LONG
 DIM SHARED errorHappened AS _BYTE, lastErrorCode AS INTEGER, runtimeErr AS INTEGER
 DIM SHARED keyhit AS LONG, screenKeyStatus AS _BYTE
 DIM SHARED running AS _BYTE, loaded AS _BYTE, loadedFile$
-DIM SHARED MyBad AS _BYTE
+DIM SHARED MyBad AS _BYTE, prevListFG AS _UNSIGNED LONG, prevListBG AS _UNSIGNED LONG
 DIM L$, L1$, temp$, saveFile$, k$, i AS LONG, j AS LONG
 DIM q AS STRING * 1
 
@@ -221,10 +221,14 @@ DO
                 newProgram fileArg$(MID$(L1$, 5))
             ELSEIF LEFT$(L$, 5) = "LIST " AND VAL(MID$(L$, 6)) > 0 THEN
                 j = VAL(MID$(L$, 6))
+                prevListFG = _DEFAULTCOLOR: prevListBG = _BACKGROUNDCOLOR
                 IF NOT loaded THEN
                     PRINT "No program loaded."
                 ELSEIF j <= UBOUND(program) THEN
-                    PRINT program(j)
+                    IF NOT headless THEN codeBackground
+                    printCode program(j)
+                    IF NOT headless THEN COLOR prevListFG, prevListBG
+                    PRINT
                 ELSE
                     PRINT "Invalid line number -"; j
                 END IF
@@ -372,19 +376,18 @@ SUB listProgram (pause AS _BYTE)
     maxSpaceBefore = LEN(STR$(UBOUND(program))) + 1
 
     MyBad = true
-    IF NOT headless THEN COLOR , 0
+    IF NOT headless THEN codeBackground
     FOR i = 1 TO UBOUND(program)
         num$ = STR$(i)
         num$ = SPACE$(maxSpaceBefore - LEN(num$) - 1) + num$ + " "
         IF headless THEN PRINT num$; program(i): _CONTINUE
-        COLOR 8
+        codeColor EC_GUTTER
         PRINT num$;
-        COLOR 7
-        PRINT program(i);
+        printCode program(i)
         IF POS(1) < screenMaxCols THEN PRINT SPACE$((screenMaxCols + 1) - POS(1));
 
         IF i MOD 20 = 0 AND pause THEN
-            COLOR 8
+            codeColor EC_GUTTER
             PRINT "-- hit a key --"
             k$ = "": WHILE k$ = "": k$ = INKEY$: _LIMIT 30: WEND
             IF k$ = CHR$(3) THEN
