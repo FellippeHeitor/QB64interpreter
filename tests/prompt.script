@@ -1,0 +1,12 @@
+FOR i = 1 TO 3: PRINT i;: NEXT: PRINT
+x = 7: DIM a(2): a(1) = x * 2
+PRINT a(1); UCASE$("ok")
+IF x > 5 THEN PRINT "big" ELSE PRINT "small"
+FOR i = 1 TO 2
+PRINT nope(
+LOAD tests/gosub.bas
+RUN
+LIST VAR
+LIST 2
+CLEAR
+LIST VAR

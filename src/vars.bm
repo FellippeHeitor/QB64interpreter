@@ -1,0 +1,428 @@
+'vars.bm - variables, arrays and call frames
+'
+'All variables live in vars() (scalar values in nums()/strings(), array
+'elements in poolNum()/poolStr()). Names are found through a hash table.
+'Inside a SUB/FUNCTION call, new names are created under a per-call key
+'prefix, so they're local; main-module names are visible there only when
+'they're DIM SHARED (or CONST, or built-in functions).
+
+FUNCTION hashKey& (k$)
+    DIM i AS LONG, h AS LONG
+    FOR i = 1 TO LEN(k$)
+        h = (h * 31 + ASC(k$, i)) AND varHashSize
+    NEXT
+    hashKey& = h
+END FUNCTION
+
+FUNCTION lookupKey& (k$)
+    DIM i AS LONG
+    i = varHash(hashKey(k$))
+    DO WHILE i
+        IF vars(i).key = k$ THEN lookupKey& = i: EXIT FUNCTION
+        i = vars(i).nextHash
+    LOOP
+END FUNCTION
+
+FUNCTION resolveVar& (i AS LONG)
+    'follows aliases (BYREF parameters, SHARED) to the real variable
+    DIM r AS LONG
+    r = i
+    DO WHILE r > 0
+        IF vars(r).refIdx = 0 THEN EXIT DO
+        r = vars(r).refIdx
+    LOOP
+    resolveVar& = r
+END FUNCTION
+
+FUNCTION findName& (name$, arraySuffix$)
+    'a variable (arraySuffix$ = "") or array ("()") visible from the current frame
+    DIM k$, i AS LONG
+    k$ = LCASE$(_TRIM$(name$)) + arraySuffix$
+    IF frameId THEN
+        i = lookupKey(framePrefix$ + k$)
+        IF i THEN findName& = resolveVar(i): EXIT FUNCTION
+        i = lookupKey(k$)
+        IF i THEN
+            IF vars(i).isShared OR vars(i).protected OR vars(i).isConst THEN findName& = resolveVar(i)
+        END IF
+    ELSE
+        i = lookupKey(k$)
+        IF i THEN findName& = resolveVar(i)
+    END IF
+END FUNCTION
+
+FUNCTION searchVar~& (varName$)
+    searchVar~& = findName(varName$, "")
+END FUNCTION
+
+FUNCTION findArray& (varName$)
+    findArray& = findName(varName$, "()")
+END FUNCTION
+
+FUNCTION lookupOwn& (varName$, isArr AS _BYTE, isGlobal AS _BYTE)
+    'a name defined in this exact scope (no SHARED fallback, no alias resolving)
+    DIM k$
+    k$ = LCASE$(_TRIM$(varName$))
+    IF isArr THEN k$ = k$ + "()"
+    IF isGlobal = 0 THEN k$ = framePrefix$ + k$
+    lookupOwn& = lookupKey(k$)
+END FUNCTION
+
+FUNCTION newVar& (varName$, t AS _BYTE, isArr AS _BYTE, isGlobal AS _BYTE)
+    DIM h AS LONG, k$, i AS LONG
+
+    totalVars = totalVars + 1
+    IF totalVars > UBOUND(vars) THEN
+        REDIM _PRESERVE vars(totalVars + 99) AS vartype
+        REDIM _PRESERVE strings(totalVars + 99) AS STRING
+        REDIM _PRESERVE nums(totalVars + 99) AS _FLOAT
+    END IF
+    i = totalVars
+
+    k$ = LCASE$(_TRIM$(varName$))
+    IF isArr THEN k$ = k$ + "()"
+    IF isGlobal = 0 THEN k$ = framePrefix$ + k$
+
+    vars(i).name = _TRIM$(varName$)
+    vars(i).key = k$
+    vars(i).type = t
+    vars(i).protected = false
+    vars(i).isConst = false
+    vars(i).isShared = false
+    vars(i).refIdx = 0
+    vars(i).isArray = isArr
+    vars(i).nDims = 0
+    vars(i).dimStart = 0
+    vars(i).firstElem = 0
+    vars(i).size = 0
+    strings(i) = ""
+    nums(i) = 0
+
+    h = hashKey(k$)
+    vars(i).nextHash = varHash(h)
+    varHash(h) = i
+    newVar& = i
+END FUNCTION
+
+FUNCTION addVar~& (varName$)
+    'finds a scalar variable, or creates it in the current scope
+    DIM found AS LONG
+    found = findName(varName$, "")
+    IF found THEN addVar~& = found: EXIT FUNCTION
+    addVar~& = newVar(varName$, detectType(varName$), false, (frameId = 0))
+END FUNCTION
+
+SUB dropVarsAbove (mark AS LONG)
+    'removes the newest variables (a finished call's locals)
+    DIM i AS LONG
+    FOR i = totalVars TO mark + 1 STEP -1
+        varHash(hashKey(vars(i).key)) = vars(i).nextHash
+        strings(i) = ""
+        vars(i).key = ""
+        vars(i).name = ""
+    NEXT
+    IF mark < totalVars THEN totalVars = mark
+END SUB
+
+SUB clearVars
+    'removes all user variables and arrays; built-in function names stay
+    DIM i AS LONG
+    dropVarsAbove builtinCount
+    FOR i = 1 TO poolTop: poolStr(i) = "": NEXT
+    poolTop = 0: dimTop = 0
+    poolGlobalHigh = 0: dimGlobalHigh = 0
+END SUB
+
+FUNCTION detectType%% (__varname$)
+    DIM varname$, c AS INTEGER
+
+    varname$ = LTRIM$(RTRIM$(__varname$))
+
+    'no suffix: DEFINT/DEFSTR/... default for the first letter
+    detectType%% = varTypeSINGLE
+    c = ASC(UCASE$(varname$ + "A")) - 64
+    IF c >= 1 AND c <= 26 THEN detectType%% = defType(c)
+
+    IF RIGHT$(varname$, 1) = "$" THEN detectType%% = varTypeSTRING
+
+    IF RIGHT$(varname$, 3) = "~%%" THEN
+        detectType%% = varType_UBYTE
+    ELSEIF RIGHT$(varname$, 2) = "%%" THEN
+        detectType%% = varType_BYTE
+    ELSEIF RIGHT$(varname$, 2) = "~%" THEN
+        detectType%% = varType_UINTEGER
+    ELSEIF RIGHT$(varname$, 1) = "%" THEN
+        detectType%% = varTypeINTEGER
+    END IF
+
+    IF RIGHT$(varname$, 1) = "!" THEN
+        detectType%% = varTypeSINGLE
+    ELSEIF RIGHT$(varname$, 2) = "##" THEN
+        detectType%% = varType_FLOAT
+    ELSEIF RIGHT$(varname$, 1) = "#" THEN
+        detectType%% = varTypeDOUBLE
+    END IF
+
+    IF RIGHT$(varname$, 3) = "~&&" THEN
+        detectType%% = varType_UINTEGER64
+    ELSEIF RIGHT$(varname$, 2) = "&&" THEN
+        detectType%% = varType_INTEGER64
+    ELSEIF RIGHT$(varname$, 2) = "~&" THEN
+        detectType%% = varType_ULONG
+    ELSEIF RIGHT$(varname$, 1) = "&" THEN
+        detectType%% = varTypeLONG
+    END IF
+END FUNCTION
+
+FUNCTION hasSuffix%% (n$)
+    hasSuffix%% = INSTR("$%&!#~`", RIGHT$(n$, 1)) > 0
+END FUNCTION
+
+FUNCTION baseName$ (n$)
+    'name without its type suffix, uppercase
+    DIM b AS LONG
+    b = LEN(n$)
+    DO WHILE b > 0
+        IF INSTR("$%&!#~`", MID$(n$, b, 1)) = 0 THEN EXIT DO
+        b = b - 1
+    LOOP
+    baseName$ = UCASE$(LEFT$(n$, b))
+END FUNCTION
+
+FUNCTION validName%% (n$)
+    'a plain variable name: letter, then letters/digits/_/., then a type suffix
+    DIM i AS LONG, c AS INTEGER, body AS LONG
+    IF LEN(n$) = 0 THEN EXIT FUNCTION
+    c = ASC(UCASE$(n$), 1)
+    IF (c < 65 OR c > 90) AND c <> 95 THEN EXIT FUNCTION
+    body = LEN(baseName$(n$))
+    IF body = 0 OR body > 40 THEN EXIT FUNCTION 'QB64 limits names to 40 characters
+    FOR i = 1 TO body
+        IF isIdentChar(ASC(n$, i)) = 0 THEN EXIT FUNCTION
+    NEXT
+    IF body < LEN(n$) THEN
+        SELECT CASE MID$(n$, body + 1)
+            CASE "$", "%", "&", "!", "#", "##", "%%", "&&", "~%", "~%%", "~&", "~&&"
+            CASE ELSE: EXIT FUNCTION
+        END SELECT
+    END IF
+    validName%% = true
+END FUNCTION
+
+FUNCTION typeFromText%% (t$)
+    'type name after AS; -1 when unknown
+    DIM u$
+    u$ = UCASE$(_TRIM$(t$))
+    DO WHILE INSTR(u$, "  "): u$ = LEFT$(u$, INSTR(u$, "  ") - 1) + MID$(u$, INSTR(u$, "  ") + 1): LOOP
+    IF LEFT$(u$, 6) = "STRING" THEN typeFromText%% = varTypeSTRING: EXIT FUNCTION 'STRING * n too
+    SELECT CASE u$
+        CASE "INTEGER": typeFromText%% = varTypeINTEGER
+        CASE "LONG": typeFromText%% = varTypeLONG
+        CASE "SINGLE": typeFromText%% = varTypeSINGLE
+        CASE "DOUBLE": typeFromText%% = varTypeDOUBLE
+        CASE "_FLOAT": typeFromText%% = varType_FLOAT
+        CASE "_BYTE", "_BIT": typeFromText%% = varType_BYTE
+        CASE "_UNSIGNED _BYTE", "_UNSIGNED _BIT": typeFromText%% = varType_UBYTE
+        CASE "_UNSIGNED INTEGER": typeFromText%% = varType_UINTEGER
+        CASE "_UNSIGNED LONG": typeFromText%% = varType_ULONG
+        CASE "_INTEGER64", "_OFFSET": typeFromText%% = varType_INTEGER64
+        CASE "_UNSIGNED _INTEGER64", "_UNSIGNED _OFFSET": typeFromText%% = varType_UINTEGER64
+        CASE ELSE: typeFromText%% = -1
+    END SELECT
+END FUNCTION
+
+FUNCTION takeTypeWords%% (t$)
+    'reads a type name from the start of t$ ("_UNSIGNED LONG a, b") and
+    'removes it from t$; -1 when there's no known type there
+    DIM u$, n AS LONG, cand$, list$, p AS LONG, q AS LONG
+    list$ = "_UNSIGNED _INTEGER64|_UNSIGNED _OFFSET|_UNSIGNED INTEGER|_UNSIGNED LONG|_UNSIGNED _BYTE|"
+    list$ = list$ + "_UNSIGNED _BIT|_INTEGER64|_OFFSET|_FLOAT|_BYTE|_BIT|INTEGER|LONG|SINGLE|DOUBLE|STRING|"
+    u$ = UCASE$(LTRIM$(t$))
+    p = 1
+    DO
+        q = INSTR(p, list$, "|")
+        IF q = 0 THEN EXIT DO
+        cand$ = MID$(list$, p, q - p)
+        p = q + 1
+        n = LEN(cand$)
+        IF LEFT$(u$, n) = cand$ AND (LEN(u$) = n OR MID$(u$, n + 1, 1) = " ") THEN
+            takeTypeWords%% = typeFromText(cand$)
+            t$ = LTRIM$(MID$(LTRIM$(t$), n + 1))
+            EXIT FUNCTION
+        END IF
+    LOOP
+    takeTypeWords%% = -1
+END FUNCTION
+
+'---------------------------------------------------------------- arrays
+SUB allocArray (idx AS LONG, nd AS INTEGER, lo() AS LONG, hi() AS LONG, preserve AS _BYTE)
+    DIM total AS LONG, d AS INTEGER, newBase AS LONG, i AS LONG, keep AS LONG, oldBase AS LONG
+
+    total = 1
+    FOR d = 1 TO nd
+        IF hi(d) < lo(d) THEN evalErr = 9: EXIT SUB
+        total = total * (hi(d) - lo(d) + 1)
+    NEXT
+
+    newBase = poolTop + 1
+    poolTop = poolTop + total
+    IF poolTop > UBOUND(poolNum) THEN
+        REDIM _PRESERVE poolNum(poolTop + 1000) AS _FLOAT
+        REDIM _PRESERVE poolStr(poolTop + 1000) AS STRING
+    END IF
+
+    oldBase = vars(idx).firstElem
+    keep = 0
+    IF preserve AND vars(idx).size > 0 THEN
+        keep = vars(idx).size
+        IF total < keep THEN keep = total
+        FOR i = 0 TO keep - 1
+            poolNum(newBase + i) = poolNum(oldBase + i)
+            poolStr(newBase + i) = poolStr(oldBase + i)
+        NEXT
+    END IF
+    FOR i = keep TO total - 1
+        poolNum(newBase + i) = 0
+        poolStr(newBase + i) = ""
+    NEXT
+    FOR i = 0 TO vars(idx).size - 1 'free the old strings
+        poolStr(oldBase + i) = ""
+    NEXT
+
+    IF vars(idx).dimStart = 0 OR nd > vars(idx).nDims THEN
+        vars(idx).dimStart = dimTop + 1
+        dimTop = dimTop + nd
+        IF dimTop > UBOUND(dimLo) THEN
+            REDIM _PRESERVE dimLo(dimTop + 100) AS LONG
+            REDIM _PRESERVE dimHi(dimTop + 100) AS LONG
+        END IF
+    END IF
+    FOR d = 1 TO nd
+        dimLo(vars(idx).dimStart + d - 1) = lo(d)
+        dimHi(vars(idx).dimStart + d - 1) = hi(d)
+    NEXT
+    vars(idx).nDims = nd
+    vars(idx).firstElem = newBase
+    vars(idx).size = total
+
+    'storage of main-module arrays must survive the end of a call
+    IF LEFT$(vars(idx).key, 1) <> "#" THEN
+        IF poolTop > poolGlobalHigh THEN poolGlobalHigh = poolTop
+        IF dimTop > dimGlobalHigh THEN dimGlobalHigh = dimTop
+    END IF
+END SUB
+
+FUNCTION autoDim& (varName$, nd AS INTEGER)
+    'using an array that was never DIMmed makes it 0 TO 10 in each dimension
+    DIM a AS LONG, d AS INTEGER, lo(1 TO 8) AS LONG, hi(1 TO 8) AS LONG
+    a = newVar(varName$, detectType(varName$), true, (frameId = 0))
+    FOR d = 1 TO nd: hi(d) = 10: NEXT
+    allocArray a, nd, lo(), hi(), false
+    autoDim& = a
+END FUNCTION
+
+FUNCTION elemIndex& (idx AS LONG, ix() AS LONG, n AS INTEGER)
+    'pool index of an element; sets evalErr 9 when out of range
+    DIM d AS INTEGER, offs AS LONG, lo AS LONG, hi AS LONG, ds AS LONG
+    IF n <> vars(idx).nDims OR vars(idx).size = 0 THEN evalErr = 9: EXIT FUNCTION
+    ds = vars(idx).dimStart
+    FOR d = 1 TO n
+        lo = dimLo(ds + d - 1): hi = dimHi(ds + d - 1)
+        IF ix(d) < lo OR ix(d) > hi THEN evalErr = 9: EXIT FUNCTION
+        offs = offs * (hi - lo + 1) + (ix(d) - lo)
+    NEXT
+    elemIndex& = vars(idx).firstElem + offs
+END FUNCTION
+
+'---------------------------------------------------------------- assignable places
+FUNCTION targetScalar& (varName$)
+    'the variable an assignment to varName$ writes to
+    DIM i AS LONG
+    IF curProc THEN
+        IF procs(curProc).isFunc AND baseName$(varName$) = procs(curProc).name THEN
+            targetScalar& = retVar 'FUNCTION's return value
+            EXIT FUNCTION
+        END IF
+    END IF
+    i = findName(varName$, "")
+    IF i THEN
+        IF vars(i).protected THEN evalErr = 1001: EXIT FUNCTION
+        IF vars(i).isConst THEN evalErr = 1002: EXIT FUNCTION
+        targetScalar& = i
+    ELSE
+        targetScalar& = newVar(varName$, detectType(varName$), false, (frameId = 0))
+    END IF
+END FUNCTION
+
+SUB parseLValue (text$, lv AS lvType)
+    'text$ is "name" or "name(index, ...)". On error sets evalErr
+    '(-1 when the error was already reported).
+    DIM t$, p AS LONG, nm$, n AS LONG, d AS INTEGER, ix(1 TO 8) AS LONG
+    REDIM parts$(0)
+
+    evalErr = 0
+    lv.idx = 0: lv.elem = 0: lv.t = varTypeSINGLE
+    t$ = _TRIM$(text$)
+    p = INSTR(t$, "(")
+    IF p = 0 THEN
+        IF validName(t$) = 0 THEN evalErr = 2: EXIT SUB
+        lv.idx = targetScalar(t$)
+        IF evalErr THEN EXIT SUB
+        lv.t = vars(lv.idx).type
+        EXIT SUB
+    END IF
+
+    IF RIGHT$(t$, 1) <> ")" THEN evalErr = 2: EXIT SUB
+    nm$ = _TRIM$(LEFT$(t$, p - 1))
+    IF validName(nm$) = 0 THEN evalErr = 2: EXIT SUB
+    n = splitArgs(MID$(t$, p + 1, LEN(t$) - p - 1), parts$())
+    IF n < 1 OR n > 8 THEN evalErr = 9: EXIT SUB
+    FOR d = 1 TO n
+        ix(d) = evalNum(parts$(d))
+        IF errorHappened THEN evalErr = -1: EXIT SUB
+    NEXT
+    lv.idx = findArray(nm$)
+    IF lv.idx = 0 THEN
+        p = searchVar(nm$)
+        IF p THEN
+            IF vars(p).protected THEN evalErr = 1001: EXIT SUB
+        END IF
+        lv.idx = autoDim(nm$, n)
+    END IF
+    lv.elem = elemIndex(lv.idx, ix(), n)
+    IF evalErr THEN EXIT SUB
+    lv.t = vars(lv.idx).type
+END SUB
+
+SUB setLV (lv AS lvType, v AS valType)
+    IF (lv.t = varTypeSTRING) <> (v.isText <> 0) THEN evalErr = 13: EXIT SUB
+    IF lv.elem THEN
+        IF v.isText THEN poolStr(lv.elem) = v.s ELSE poolNum(lv.elem) = coerce(v.n, lv.t)
+    ELSE
+        IF v.isText THEN strings(lv.idx) = v.s ELSE nums(lv.idx) = coerce(v.n, lv.t)
+    END IF
+END SUB
+
+SUB getLV (lv AS lvType, v AS valType)
+    v.isText = (lv.t = varTypeSTRING)
+    v.s = "": v.n = 0
+    IF v.isText THEN
+        v.t = varTypeSINGLE
+        IF lv.elem THEN v.s = poolStr(lv.elem) ELSE v.s = strings(lv.idx)
+    ELSE
+        v.t = lv.t
+        IF lv.elem THEN v.n = poolNum(lv.elem) ELSE v.n = nums(lv.idx)
+    END IF
+END SUB
+
+SUB setLVText (lv AS lvType, s$)
+    DIM v AS valType
+    v.isText = true: v.s = s$
+    setLV lv, v
+END SUB
+
+SUB setLVNum (lv AS lvType, n AS _FLOAT)
+    DIM v AS valType
+    v.isText = false: v.n = n: v.t = varType_FLOAT
+    setLV lv, v
+END SUB

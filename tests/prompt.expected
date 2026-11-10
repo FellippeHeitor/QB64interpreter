@@ -1,0 +1,27 @@
+.FOR i = 1 TO 3: PRINT i;: NEXT: PRINT
+ 1  2  3 
+.x = 7: DIM a(2): a(1) = x * 2
+.PRINT a(1); UCASE$("ok")
+ 14 OK
+.IF x > 5 THEN PRINT "big" ELSE PRINT "small"
+big
+.FOR i = 1 TO 2
+FOR without NEXT
+.PRINT nope(
+Syntax error
+.LOAD tests/gosub.bas
+Loaded.
+.RUN
+x = 4 
+one
+two
+three
+jumped to a2
+end
+.LIST VAR
+x =  4
+i =  4
+.LIST 2
+GOSUB dbl
+.CLEAR
+.LIST VAR

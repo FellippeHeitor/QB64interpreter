@@ -1,0 +1,752 @@
+'stmts.bm - statement handlers: output, input, files, DATA, declarations, graphics
+
+'---------------------------------------------------------------- PRINT
+SUB doPrintStmt (r$)
+    'PRINT list   /   PRINT #n, list   /   PRINT USING fmt$; list
+    DIM n AS LONG, c AS LONG, t$
+    t$ = _TRIM$(r$)
+    IF LEFT$(t$, 1) = "#" THEN
+        c = Find(1, t$, ",")
+        IF c = 0 THEN
+            n = evalNum(MID$(t$, 2)): t$ = ""
+        ELSE
+            n = evalNum(MID$(t$, 2, c - 2)): t$ = MID$(t$, c + 1)
+        END IF
+        IF errorHappened THEN EXIT SUB
+        IF n < 1 THEN throwError 52: EXIT SUB
+        doPrint n, t$
+    ELSE
+        doPrint 0, t$
+    END IF
+END SUB
+
+SUB printOut (f AS LONG, s$, col AS LONG)
+    IF f = 0 THEN PRINT s$; ELSE PRINT #f, s$;
+    col = col + LEN(s$)
+END SUB
+
+SUB doPrint (f AS LONG, argText$)
+    'items separated by ; (no gap) or , (next 14-column zone).
+    'A trailing ; or , keeps the cursor on the same line.
+    DIM i AS LONG, c AS INTEGER, depth AS LONG, quote AS _BYTE, col AS LONG
+    DIM start AS LONG, item$, lastSep$, v AS valType, nxt AS LONG, fmt$, usingMode AS _BYTE, a$
+
+    IF f = 0 THEN col = POS(0) ELSE col = 1
+    a$ = _TRIM$(argText$)
+    IF UCASE$(LEFT$(a$, 6)) = "USING " THEN
+        'PRINT USING: the format applies to each item
+        i = Find(1, a$, ";")
+        IF i = 0 THEN throwError 2: EXIT SUB
+        fmt$ = textArg$(MID$(a$, 7, i - 7))
+        IF errorHappened THEN EXIT SUB
+        usingMode = true
+        a$ = MID$(a$, i + 1)
+    END IF
+
+    start = 1
+    FOR i = 1 TO LEN(a$) + 1
+        IF i <= LEN(a$) THEN c = ASC(a$, i) ELSE c = 0
+        IF c = 34 THEN quote = NOT quote
+        IF NOT quote THEN
+            IF c = 40 THEN depth = depth + 1
+            IF c = 41 THEN depth = depth - 1
+        END IF
+        IF (quote = 0 AND depth = 0 AND (c = 59 OR c = 44)) OR c = 0 THEN
+            item$ = _TRIM$(MID$(a$, start, i - start))
+            IF LEN(item$) THEN
+                evaluate item$, v
+                IF errorHappened THEN EXIT SUB
+                IF usingMode THEN
+                    IF f = 0 THEN
+                        IF v.isText THEN PRINT USING fmt$; v.s; ELSE PRINT USING fmt$; v.n;
+                    ELSE
+                        IF v.isText THEN PRINT #f, USING fmt$; v.s; ELSE PRINT #f, USING fmt$; v.n;
+                    END IF
+                ELSEIF v.isText THEN
+                    printOut f, v.s, col
+                ELSE
+                    printOut f, numStr$(v.n, v.t) + " ", col
+                END IF
+                lastSep$ = ""
+            END IF
+            IF c = 59 THEN lastSep$ = ";"
+            IF c = 44 THEN
+                lastSep$ = ","
+                IF f = 0 THEN col = POS(0)
+                nxt = ((col - 1) \ 14 + 1) * 14 + 1
+                IF f = 0 AND nxt > _WIDTH THEN
+                    PRINT
+                ELSE
+                    printOut f, SPACE$(nxt - col), col
+                END IF
+            END IF
+            start = i + 1
+        END IF
+    NEXT
+    IF lastSep$ = "" THEN
+        IF f = 0 THEN PRINT ELSE PRINT #f, ""
+    END IF
+END SUB
+
+SUB doWrite (r$)
+    'WRITE [#n,] list: strings in quotes, items separated by commas
+    DIM t$, f AS LONG, c AS LONG, n AS LONG, i AS LONG, out$, v AS valType
+    REDIM items$(0)
+    t$ = _TRIM$(r$)
+    IF LEFT$(t$, 1) = "#" THEN
+        c = Find(1, t$, ",")
+        IF c = 0 THEN c = LEN(t$) + 1
+        f = evalNum(MID$(t$, 2, c - 2))
+        IF errorHappened THEN EXIT SUB
+        t$ = MID$(t$, c + 1)
+    END IF
+    n = splitArgs(t$, items$())
+    FOR i = 1 TO n
+        evaluate items$(i), v
+        IF errorHappened THEN EXIT SUB
+        IF i > 1 THEN out$ = out$ + ","
+        IF v.isText THEN out$ = out$ + CHR$(34) + v.s + CHR$(34) ELSE out$ = out$ + _TRIM$(numStr$(v.n, v.t))
+    NEXT
+    IF f THEN PRINT #f, out$ ELSE PRINT out$
+END SUB
+
+'---------------------------------------------------------------- INPUT
+SUB doInput (argText$, lineMode AS _BYTE)
+    'INPUT ["prompt"{;|,}] var[, var...]   /   LINE INPUT ["prompt";] var$
+    DIM t$, prompt$, qmark AS _BYTE, k AS LONG, n AS LONG, i AS LONG
+    DIM answer$, ok AS _BYTE, item$
+    REDIM names$(0), values$(0), lv(0) AS lvType
+
+    t$ = _TRIM$(argText$)
+    IF LEFT$(t$, 1) = ";" THEN t$ = _TRIM$(MID$(t$, 2))
+    qmark = NOT lineMode
+    IF LEFT$(t$, 1) = CHR$(34) THEN
+        k = INSTR(2, t$, CHR$(34))
+        IF k = 0 THEN throwError 2: EXIT SUB
+        prompt$ = MID$(t$, 2, k - 2)
+        t$ = _TRIM$(MID$(t$, k + 1))
+        IF LEFT$(t$, 1) = "," THEN
+            qmark = false
+        ELSEIF LEFT$(t$, 1) <> ";" THEN
+            throwError 2: EXIT SUB
+        END IF
+        t$ = _TRIM$(MID$(t$, 2))
+    END IF
+
+    n = splitArgs(t$, names$())
+    IF n = 0 OR (lineMode AND n > 1) THEN throwError 2: EXIT SUB
+    REDIM lv(1 TO n) AS lvType
+    FOR i = 1 TO n
+        parseLValue names$(i), lv(i)
+        IF evalErr > 0 THEN throwError evalErr
+        IF evalErr THEN EXIT SUB
+    NEXT
+    IF lineMode AND lv(1).t <> varTypeSTRING THEN throwError 13: EXIT SUB
+
+    DO
+        PRINT prompt$;
+        IF qmark THEN PRINT "? ";
+        LINE INPUT answer$
+        IF lineMode THEN setLVText lv(1), answer$: EXIT SUB
+
+        ok = (splitArgs(answer$, values$()) = n) OR (n = 1)
+        IF n = 1 THEN REDIM values$(1 TO 1): values$(1) = _TRIM$(answer$)
+        IF ok THEN
+            FOR i = 1 TO n
+                item$ = values$(i)
+                IF lv(i).t <> varTypeSTRING THEN
+                    IF LEN(item$) > 0 AND isNumber(item$) = 0 THEN ok = false: EXIT FOR
+                END IF
+            NEXT
+        END IF
+        IF ok THEN EXIT DO
+        PRINT "Redo from start"
+    LOOP
+
+    FOR i = 1 TO n
+        IF lv(i).t = varTypeSTRING THEN setLVText lv(i), removeQuote$(values$(i)) ELSE setLVNum lv(i), VAL(values$(i))
+    NEXT
+END SUB
+
+SUB doFileInput (r$, lineMode AS _BYTE)
+    'INPUT #n, var, ...   /   LINE INPUT #n, var$
+    DIM t$, c AS LONG, f AS LONG, n AS LONG, i AS LONG, s$, x AS DOUBLE, lv AS lvType
+    REDIM names$(0)
+    t$ = _TRIM$(r$)
+    c = Find(1, t$, ",")
+    IF c = 0 THEN throwError 2: EXIT SUB
+    f = evalNum(MID$(t$, 2, c - 2))
+    IF errorHappened THEN EXIT SUB
+    n = splitArgs(MID$(t$, c + 1), names$())
+    IF n = 0 OR (lineMode AND n > 1) THEN throwError 2: EXIT SUB
+    FOR i = 1 TO n
+        parseLValue names$(i), lv
+        IF evalErr > 0 THEN throwError evalErr
+        IF evalErr THEN EXIT SUB
+        IF lineMode THEN
+            IF lv.t <> varTypeSTRING THEN throwError 13: EXIT SUB
+            LINE INPUT #f, s$
+            setLVText lv, s$
+        ELSEIF lv.t = varTypeSTRING THEN
+            INPUT #f, s$
+            setLVText lv, s$
+        ELSE
+            INPUT #f, x
+            setLVNum lv, x
+        END IF
+        IF runtimeErr THEN EXIT SUB
+    NEXT
+END SUB
+
+'---------------------------------------------------------------- files
+SUB doOpen (r$)
+    'OPEN file$ FOR mode AS [#]n [LEN = size]
+    DIM u$, fp AS LONG, ap AS LONG, fname$, mode$, numText$, n AS LONG, recLen AS LONG, l AS LONG
+    u$ = UCASE$(r$)
+    fp = Find(1, u$, " FOR ")
+    ap = Find(1, u$, " AS ")
+    IF fp = 0 OR ap < fp THEN throwErrorMsg "Expected OPEN file FOR mode AS #n": EXIT SUB
+    fname$ = textArg$(LEFT$(r$, fp - 1))
+    IF errorHappened THEN EXIT SUB
+    mode$ = _TRIM$(MID$(u$, fp + 5, ap - fp - 5))
+    numText$ = _TRIM$(MID$(r$, ap + 4))
+    l = Find(1, UCASE$(numText$), "LEN")
+    IF l THEN
+        recLen = evalNum(MID$(numText$, INSTR(l, numText$, "=") + 1))
+        numText$ = LEFT$(numText$, l - 1)
+    END IF
+    numText$ = _TRIM$(numText$)
+    IF LEFT$(numText$, 1) = "#" THEN numText$ = MID$(numText$, 2)
+    n = evalNum(numText$)
+    IF errorHappened THEN EXIT SUB
+    SELECT CASE mode$
+        CASE "INPUT": OPEN fname$ FOR INPUT AS #n
+        CASE "OUTPUT": OPEN fname$ FOR OUTPUT AS #n
+        CASE "APPEND": OPEN fname$ FOR APPEND AS #n
+        CASE "BINARY": OPEN fname$ FOR BINARY AS #n
+        CASE "RANDOM"
+            IF recLen > 0 THEN OPEN fname$ FOR RANDOM AS #n LEN = recLen ELSE OPEN fname$ FOR RANDOM AS #n
+        CASE ELSE: throwErrorMsg "Unknown file mode: " + mode$
+    END SELECT
+END SUB
+
+SUB doClose (r$)
+    DIM n AS LONG, i AS LONG, a$
+    REDIM items$(0)
+    n = splitArgs(r$, items$())
+    IF n = 0 THEN CLOSE: EXIT SUB
+    FOR i = 1 TO n
+        a$ = _TRIM$(items$(i))
+        IF LEFT$(a$, 1) = "#" THEN a$ = MID$(a$, 2)
+        CLOSE #evalNum(a$)
+    NEXT
+END SUB
+
+'---------------------------------------------------------------- DATA
+SUB doRead (r$)
+    DIM n AS LONG, i AS LONG, lv AS lvType, it$
+    REDIM names$(0)
+    n = splitArgs(r$, names$())
+    IF n = 0 THEN throwError 2: EXIT SUB
+    FOR i = 1 TO n
+        IF dataPtr > dataCount THEN throwError 4: EXIT SUB
+        parseLValue names$(i), lv
+        IF evalErr > 0 THEN throwError evalErr
+        IF evalErr THEN EXIT SUB
+        it$ = dataItem(dataPtr)
+        IF lv.t = varTypeSTRING THEN
+            setLVText lv, it$
+        ELSE
+            IF dataIsStr(dataPtr) OR (LEN(it$) > 0 AND isNumber(it$) = 0 AND LEFT$(it$, 1) <> "&") THEN throwError 13: EXIT SUB
+            setLVNum lv, VAL(it$)
+        END IF
+        dataPtr = dataPtr + 1
+    NEXT
+END SUB
+
+SUB doRestore (r$)
+    DIM d AS LONG
+    IF LEN(r$) = 0 THEN dataPtr = 1: EXIT SUB
+    d = findLabelData(r$)
+    IF d < 0 THEN throwErrorMsg "Label not defined: " + r$: EXIT SUB
+    dataPtr = d
+END SUB
+
+'---------------------------------------------------------------- declarations
+SUB doDim (r$, mode AS INTEGER)
+    'mode 0: DIM, 1: REDIM, 2: SHARED (inside a SUB)
+    DIM t$, u$, isShared AS _BYTE, preserve AS _BYTE, commonType AS INTEGER, n AS LONG, i AS LONG
+    DIM it$, ai AS LONG, ty AS INTEGER, p AS LONG, nm$, nd AS LONG, d AS LONG, k AS LONG
+    DIM idx AS LONG, g AS LONG, isGlobal AS _BYTE, same AS _BYTE
+    DIM lo(1 TO 8) AS LONG, hi(1 TO 8) AS LONG
+    REDIM items$(0), dp$(0)
+
+    t$ = _TRIM$(r$)
+    DO
+        u$ = UCASE$(t$)
+        IF mode = 1 AND LEFT$(u$, 10) = "_PRESERVE " THEN
+            preserve = true: t$ = _TRIM$(MID$(t$, 11))
+        ELSEIF mode <> 2 AND LEFT$(u$, 7) = "SHARED " THEN
+            isShared = true: t$ = _TRIM$(MID$(t$, 8))
+        ELSE
+            EXIT DO
+        END IF
+    LOOP
+    commonType = -1
+    IF UCASE$(LEFT$(t$, 3)) = "AS " THEN 'DIM AS INTEGER a, b
+        t$ = MID$(t$, 4)
+        commonType = takeTypeWords(t$)
+        IF commonType < 0 THEN throwError 1004: EXIT SUB
+    END IF
+
+    n = splitArgs(t$, items$())
+    IF n = 0 THEN throwError 2: EXIT SUB
+    FOR i = 1 TO n
+        it$ = items$(i)
+        ty = commonType
+        ai = Find(1, UCASE$(it$), " AS ")
+        IF ai THEN
+            ty = typeFromText(MID$(it$, ai + 4))
+            IF ty < 0 THEN throwError 1004: EXIT SUB
+            it$ = _TRIM$(LEFT$(it$, ai - 1))
+        END IF
+        p = INSTR(it$, "(")
+        IF p THEN nm$ = _TRIM$(LEFT$(it$, p - 1)) ELSE nm$ = it$
+        IF validName(nm$) = 0 THEN throwError 2: EXIT SUB
+        IF ty < 0 THEN ty = detectType(nm$)
+        isGlobal = (frameId = 0) OR isShared OR mode = 2
+
+        IF mode = 2 THEN
+            'SHARED x inside a SUB: x is the main module's x
+            g = lookupOwn(nm$, (p > 0), true)
+            IF g = 0 THEN g = newVar(nm$, ty, (p > 0), true)
+            idx = newVar(nm$, ty, (p > 0), false)
+            vars(idx).refIdx = g
+            _CONTINUE
+        END IF
+
+        IF p = 0 THEN
+            'scalar
+            idx = lookupOwn(nm$, false, isGlobal)
+            IF idx THEN
+                IF vars(idx).type <> ty THEN throwError 10: EXIT SUB
+            ELSE
+                idx = newVar(nm$, ty, false, isGlobal)
+            END IF
+            IF isShared THEN vars(idx).isShared = true
+            _CONTINUE
+        END IF
+
+        'array
+        k = matchParen(it$, p)
+        IF k <> LEN(it$) THEN throwError 2: EXIT SUB
+        nd = splitArgs(MID$(it$, p + 1, k - p - 1), dp$())
+        IF nd > 8 THEN throwError 9: EXIT SUB
+        FOR d = 1 TO nd
+            ai = Find(1, UCASE$(dp$(d)), " TO ")
+            IF ai THEN
+                lo(d) = evalNum(LEFT$(dp$(d), ai - 1))
+                hi(d) = evalNum(MID$(dp$(d), ai + 4))
+            ELSE
+                lo(d) = 0
+                hi(d) = evalNum(dp$(d))
+            END IF
+            IF errorHappened THEN EXIT SUB
+        NEXT
+        idx = lookupOwn(nm$, true, isGlobal)
+        IF idx THEN
+            idx = resolveVar(idx)
+            IF vars(idx).type <> ty THEN throwError 10: EXIT SUB
+            same = (mode = 0 AND vars(idx).nDims = nd)
+            IF same THEN
+                FOR d = 1 TO nd
+                    IF dimLo(vars(idx).dimStart + d - 1) <> lo(d) OR dimHi(vars(idx).dimStart + d - 1) <> hi(d) THEN same = false
+                NEXT
+            END IF
+            IF same THEN _CONTINUE 'DIM run again (in a loop): keep the array
+        ELSE
+            idx = newVar(nm$, ty, true, isGlobal)
+        END IF
+        IF isShared THEN vars(idx).isShared = true
+        IF nd > 0 THEN
+            evalErr = 0
+            allocArray idx, nd, lo(), hi(), preserve
+            IF evalErr THEN throwError evalErr: EXIT SUB
+        END IF
+    NEXT
+END SUB
+
+SUB doConst (r$)
+    DIM n AS LONG, i AS LONG, e AS LONG, nm$, v AS valType, t AS INTEGER, idx AS LONG
+    REDIM items$(0)
+    n = splitArgs(r$, items$())
+    FOR i = 1 TO n
+        e = INSTR(items$(i), "=")
+        IF e = 0 THEN throwError 2: EXIT SUB
+        nm$ = _TRIM$(LEFT$(items$(i), e - 1))
+        IF validName(nm$) = 0 THEN throwError 2: EXIT SUB
+        idx = lookupOwn(nm$, false, true)
+        IF idx THEN
+            IF vars(idx).isConst THEN _CONTINUE 'CONST run again (in a loop)
+            throwError 10: EXIT SUB
+        END IF
+        evaluate MID$(items$(i), e + 1), v
+        IF errorHappened THEN EXIT SUB
+        IF hasSuffix(nm$) THEN
+            t = detectType(nm$)
+            IF (t = varTypeSTRING) <> (v.isText <> 0) THEN throwError 13: EXIT SUB
+        ELSEIF v.isText THEN
+            t = varTypeSTRING
+        ELSE
+            t = v.t
+        END IF
+        idx = newVar(nm$, t, false, true)
+        vars(idx).isConst = true
+        IF v.isText THEN strings(idx) = v.s ELSE nums(idx) = coerce(v.n, t)
+    NEXT
+END SUB
+
+SUB doSwap (r$)
+    DIM a AS lvType, b AS lvType, va AS valType, vb AS valType
+    REDIM items$(0)
+    IF splitArgs(r$, items$()) <> 2 THEN throwError 2: EXIT SUB
+    parseLValue items$(1), a
+    IF evalErr > 0 THEN throwError evalErr
+    IF evalErr THEN EXIT SUB
+    parseLValue items$(2), b
+    IF evalErr > 0 THEN throwError evalErr
+    IF evalErr THEN EXIT SUB
+    IF a.t <> b.t THEN throwError 13: EXIT SUB
+    getLV a, va: getLV b, vb
+    setLV a, vb: setLV b, va
+END SUB
+
+SUB doErase (r$)
+    DIM n AS LONG, i AS LONG, idx AS LONG, j AS LONG, a$
+    REDIM items$(0)
+    n = splitArgs(r$, items$())
+    FOR i = 1 TO n
+        a$ = _TRIM$(items$(i))
+        IF RIGHT$(a$, 2) = "()" THEN a$ = LEFT$(a$, LEN(a$) - 2)
+        idx = findArray(a$)
+        IF idx = 0 THEN throwError 9: EXIT SUB
+        FOR j = 0 TO vars(idx).size - 1
+            poolNum(vars(idx).firstElem + j) = 0
+            poolStr(vars(idx).firstElem + j) = ""
+        NEXT
+    NEXT
+END SUB
+
+SUB doMidStmt (r$)
+    'MID$(target$, start[, length]) = text$
+    DIM k AS LONG, e AS LONG, n AS LONG, lv AS lvType, cur AS valType, st AS LONG, ln AS LONG, s$
+    REDIM a$(0)
+    k = matchParen(r$, 1)
+    IF k = 0 THEN throwError 2: EXIT SUB
+    e = Find(k, r$, "=")
+    IF e = 0 THEN throwError 2: EXIT SUB
+    n = splitArgs(MID$(r$, 2, k - 2), a$())
+    IF n < 2 OR n > 3 THEN throwError 2: EXIT SUB
+    parseLValue a$(1), lv
+    IF evalErr > 0 THEN throwError evalErr
+    IF evalErr THEN EXIT SUB
+    IF lv.t <> varTypeSTRING THEN throwError 13: EXIT SUB
+    st = evalNum(a$(2))
+    s$ = textArg$(MID$(r$, e + 1))
+    IF errorHappened THEN EXIT SUB
+    ln = LEN(s$)
+    IF n = 3 THEN ln = evalNum(a$(3))
+    getLV lv, cur
+    IF st < 1 OR st > LEN(cur.s) THEN throwError 5: EXIT SUB
+    MID$(cur.s, st, ln) = s$
+    setLVText lv, cur.s
+END SUB
+
+'---------------------------------------------------------------- screen
+SUB doCls (r$)
+    REDIM a$(0)
+    SELECT CASE splitArgs(r$, a$())
+        CASE 0: CLS
+        CASE 1: CLS evalNum(a$(1))
+        CASE 2
+            IF LEN(a$(1)) THEN CLS evalNum(a$(1)), evalNum(a$(2)) ELSE CLS , evalNum(a$(2))
+        CASE ELSE: throwError 2
+    END SELECT
+END SUB
+
+SUB doColor (r$)
+    REDIM a$(0)
+    SELECT CASE splitArgs(r$, a$())
+        CASE 1
+            COLOR evalNum(a$(1))
+        CASE 2
+            IF LEN(a$(1)) = 0 THEN
+                COLOR , evalNum(a$(2))
+            ELSEIF LEN(a$(2)) = 0 THEN
+                COLOR evalNum(a$(1))
+            ELSE
+                COLOR evalNum(a$(1)), evalNum(a$(2))
+            END IF
+        CASE ELSE
+            throwError 2
+    END SELECT
+END SUB
+
+SUB doLocate (r$)
+    DIM row AS LONG, col AS LONG, l AS LONG
+    REDIM a$(0)
+    l = splitArgs(r$, a$())
+    IF l > 3 THEN throwError 2: EXIT SUB
+    row = CSRLIN: col = POS(0)
+    IF l >= 1 THEN IF LEN(a$(1)) THEN row = evalNum(a$(1))
+    IF l >= 2 THEN IF LEN(a$(2)) THEN col = evalNum(a$(2))
+    IF errorHappened THEN EXIT SUB
+    LOCATE row, col
+    IF l >= 3 THEN IF LEN(a$(3)) THEN LOCATE , , evalNum(a$(3))
+END SUB
+
+SUB doWidth (r$)
+    REDIM a$(0)
+    SELECT CASE splitArgs(r$, a$())
+        CASE 1
+            WIDTH evalNum(a$(1))
+        CASE 2
+            IF LEN(a$(1)) = 0 THEN
+                WIDTH , evalNum(a$(2))
+            ELSEIF LEN(a$(2)) = 0 THEN
+                WIDTH evalNum(a$(1))
+            ELSE
+                WIDTH evalNum(a$(1)), evalNum(a$(2))
+            END IF
+        CASE ELSE
+            throwError 2
+    END SELECT
+END SUB
+
+SUB doPalette (r$)
+    REDIM a$(0)
+    SELECT CASE splitArgs(r$, a$())
+        CASE 0: PALETTE
+        CASE 2: PALETTE evalNum(a$(1)), evalNum(a$(2))
+        CASE ELSE: throwError 2
+    END SELECT
+END SUB
+
+SUB doTwoNums (r$, what AS INTEGER)
+    DIM x AS DOUBLE, y AS DOUBLE
+    REDIM a$(0)
+    IF splitArgs(r$, a$()) <> 2 THEN throwError 2: EXIT SUB
+    x = evalNum(a$(1)): y = evalNum(a$(2))
+    IF errorHappened THEN EXIT SUB
+    SELECT CASE what
+        CASE 1: PCOPY x, y
+        CASE 2: _SCREENMOVE x, y
+        CASE 3: _MOUSEMOVE x, y
+    END SELECT
+END SUB
+
+SUB doSound (r$)
+    DIM freq AS SINGLE, dur AS SINGLE
+    REDIM a$(0)
+    IF splitArgs(r$, a$()) <> 2 THEN throwError 2: EXIT SUB
+    freq = evalNum(a$(1)): dur = evalNum(a$(2))
+    IF errorHappened THEN EXIT SUB
+    IF freq = 0 OR (freq >= 37 AND freq <= 32767) THEN SOUND freq, dur ELSE throwError 5
+END SUB
+
+'---------------------------------------------------------------- graphics
+FUNCTION takePoint%% (t$, x AS SINGLE, y AS SINGLE, isStep AS _BYTE)
+    'reads "(x, y)" or "STEP(x, y)" from the start of t$ and removes it
+    DIM k AS LONG
+    REDIM xy$(0)
+    t$ = LTRIM$(t$)
+    isStep = (UCASE$(LEFT$(t$, 4)) = "STEP")
+    IF isStep THEN t$ = LTRIM$(MID$(t$, 5))
+    IF LEFT$(t$, 1) <> "(" THEN throwError 2: EXIT FUNCTION
+    k = matchParen(t$, 1)
+    IF k = 0 THEN throwError 2: EXIT FUNCTION
+    IF splitArgs(MID$(t$, 2, k - 2), xy$()) <> 2 THEN throwError 2: EXIT FUNCTION
+    x = evalNum(xy$(1)): y = evalNum(xy$(2))
+    t$ = LTRIM$(MID$(t$, k + 1))
+    takePoint%% = (errorHappened = 0)
+END FUNCTION
+
+FUNCTION needGraphics%%
+    IF _PIXELSIZE(_DEST) = 0 THEN throwError 5 ELSE needGraphics%% = true
+END FUNCTION
+
+SUB doPset (r$, isPreset AS _BYTE)
+    'PSET [STEP](x, y)[, color]
+    DIM t$, x AS SINGLE, y AS SINGLE, st AS _BYTE, c AS _UNSIGNED LONG
+    IF needGraphics = 0 THEN EXIT SUB
+    t$ = r$
+    IF takePoint(t$, x, y, st) = 0 THEN EXIT SUB
+    IF st THEN x = x + POINT(2): y = y + POINT(3)
+    IF isPreset THEN c = _BACKGROUNDCOLOR ELSE c = _DEFAULTCOLOR
+    IF LEFT$(t$, 1) = "," THEN
+        c = evalNum(MID$(t$, 2))
+    ELSEIF LEN(t$) THEN
+        throwError 2: EXIT SUB
+    END IF
+    IF errorHappened THEN EXIT SUB
+    PSET (x, y), c
+END SUB
+
+SUB doLine (r$)
+    'LINE [[STEP](x1, y1)]-[STEP](x2, y2)[, [color][, [B|BF][, style]]]
+    DIM t$, x1 AS SINGLE, y1 AS SINGLE, x2 AS SINGLE, y2 AS SINGLE, st AS _BYTE
+    DIM c AS _UNSIGNED LONG, box$, style AS LONG, n AS LONG
+    REDIM a$(0)
+    IF needGraphics = 0 THEN EXIT SUB
+    t$ = LTRIM$(r$)
+    IF LEFT$(t$, 1) = "-" THEN
+        x1 = POINT(2): y1 = POINT(3)
+    ELSE
+        IF takePoint(t$, x1, y1, st) = 0 THEN EXIT SUB
+        IF st THEN x1 = x1 + POINT(2): y1 = y1 + POINT(3)
+        IF LEFT$(t$, 1) <> "-" THEN throwError 2: EXIT SUB
+    END IF
+    t$ = MID$(t$, 2)
+    IF takePoint(t$, x2, y2, st) = 0 THEN EXIT SUB
+    IF st THEN x2 = x2 + x1: y2 = y2 + y1
+
+    c = _DEFAULTCOLOR: style = -1
+    IF LEFT$(t$, 1) = "," THEN
+        n = splitArgs(MID$(t$, 2), a$())
+        IF n >= 1 THEN IF LEN(a$(1)) THEN c = evalNum(a$(1))
+        IF n >= 2 THEN box$ = UCASE$(a$(2))
+        IF n >= 3 THEN IF LEN(a$(3)) THEN style = evalNum(a$(3))
+        IF n > 3 OR (box$ <> "" AND box$ <> "B" AND box$ <> "BF") THEN throwError 2: EXIT SUB
+    ELSEIF LEN(t$) THEN
+        throwError 2: EXIT SUB
+    END IF
+    IF errorHappened THEN EXIT SUB
+
+    IF style < 0 THEN
+        SELECT CASE box$
+            CASE "": LINE (x1, y1)-(x2, y2), c
+            CASE "B": LINE (x1, y1)-(x2, y2), c, B
+            CASE "BF": LINE (x1, y1)-(x2, y2), c, BF
+        END SELECT
+    ELSE
+        SELECT CASE box$
+            CASE "": LINE (x1, y1)-(x2, y2), c, , style
+            CASE "B": LINE (x1, y1)-(x2, y2), c, B, style
+            CASE "BF": LINE (x1, y1)-(x2, y2), c, BF
+        END SELECT
+    END IF
+END SUB
+
+SUB doPaint (r$)
+    'PAINT [STEP](x, y)[, color[, border]]
+    DIM t$, x AS SINGLE, y AS SINGLE, st AS _BYTE, c AS _UNSIGNED LONG, b AS _UNSIGNED LONG, n AS LONG
+    REDIM a$(0)
+    IF needGraphics = 0 THEN EXIT SUB
+    t$ = r$
+    IF takePoint(t$, x, y, st) = 0 THEN EXIT SUB
+    IF st THEN x = x + POINT(2): y = y + POINT(3)
+    c = _DEFAULTCOLOR
+    IF LEFT$(t$, 1) = "," THEN
+        n = splitArgs(MID$(t$, 2), a$())
+        IF n >= 1 THEN IF LEN(a$(1)) THEN c = evalNum(a$(1))
+        IF errorHappened THEN EXIT SUB
+        IF n >= 2 THEN
+            b = evalNum(a$(2))
+            IF errorHappened THEN EXIT SUB
+            PAINT (x, y), c, b
+            EXIT SUB
+        END IF
+    ELSEIF LEN(t$) THEN
+        throwError 2: EXIT SUB
+    END IF
+    PAINT (x, y), c
+END SUB
+
+SUB doCircle (argText$)
+    'CIRCLE [STEP](x, y), radius[, color[, start, end[, aspect]]]
+    DIM t$, x AS SINGLE, y AS SINGLE, st AS _BYTE, r AS SINGLE, c AS _UNSIGNED LONG
+    DIM arcS AS SINGLE, arcE AS SINGLE, asp AS SINGLE
+    DIM hasArc AS _BYTE, hasAsp AS _BYTE, m AS LONG
+    REDIM p$(0)
+
+    IF needGraphics = 0 THEN EXIT SUB
+    t$ = argText$
+    IF takePoint(t$, x, y, st) = 0 THEN EXIT SUB
+    IF st THEN x = x + POINT(2): y = y + POINT(3)
+    IF LEFT$(t$, 1) <> "," THEN throwError 2: EXIT SUB
+    m = splitArgs(MID$(t$, 2), p$())
+    IF m < 1 OR m > 5 THEN throwError 2: EXIT SUB
+
+    r = evalNum(p$(1))
+    c = _DEFAULTCOLOR
+    IF m >= 2 THEN IF LEN(p$(2)) THEN c = evalNum(p$(2))
+    arcS = 0: arcE = _PI(2)
+    IF m >= 3 THEN IF LEN(p$(3)) THEN arcS = evalNum(p$(3)): hasArc = true
+    IF m >= 4 THEN IF LEN(p$(4)) THEN arcE = evalNum(p$(4)): hasArc = true
+    IF m >= 5 THEN IF LEN(p$(5)) THEN asp = evalNum(p$(5)): hasAsp = true
+    IF errorHappened THEN EXIT SUB
+
+    IF hasArc AND hasAsp THEN
+        CIRCLE (x, y), r, c, arcS, arcE, asp
+    ELSEIF hasAsp THEN
+        CIRCLE (x, y), r, c, , , asp
+    ELSEIF hasArc THEN
+        CIRCLE (x, y), r, c, arcS, arcE
+    ELSE
+        CIRCLE (x, y), r, c
+    END IF
+END SUB
+
+SUB doPrintString (r$)
+    '_PRINTSTRING (x, y), text$[, image]
+    DIM t$, x AS SINGLE, y AS SINGLE, st AS _BYTE, n AS LONG, s$
+    REDIM a$(0)
+    t$ = r$
+    IF takePoint(t$, x, y, st) = 0 THEN EXIT SUB
+    IF LEFT$(t$, 1) <> "," THEN throwError 2: EXIT SUB
+    n = splitArgs(MID$(t$, 2), a$())
+    IF n < 1 OR n > 2 THEN throwError 2: EXIT SUB
+    s$ = textArg$(a$(1))
+    IF errorHappened THEN EXIT SUB
+    IF n = 2 THEN _PRINTSTRING (x, y), s$, evalNum(a$(2)) ELSE _PRINTSTRING (x, y), s$
+END SUB
+
+SUB doPutImage (r$)
+    '_PUTIMAGE , src[, dst]   /   _PUTIMAGE (x, y), src[, dst]
+    '_PUTIMAGE (x1, y1)-(x2, y2), src[, dst]
+    DIM t$, x1 AS SINGLE, y1 AS SINGLE, x2 AS SINGLE, y2 AS SINGLE, st AS _BYTE
+    DIM src AS LONG, dst AS LONG, n AS LONG, form AS INTEGER
+    REDIM a$(0)
+    t$ = LTRIM$(r$)
+    IF LEFT$(t$, 1) = "(" OR UCASE$(LEFT$(t$, 4)) = "STEP" THEN
+        IF takePoint(t$, x1, y1, st) = 0 THEN EXIT SUB
+        form = 1
+        IF LEFT$(t$, 1) = "-" THEN
+            t$ = MID$(t$, 2)
+            IF takePoint(t$, x2, y2, st) = 0 THEN EXIT SUB
+            form = 2
+        END IF
+    END IF
+    IF LEFT$(t$, 1) <> "," THEN throwError 2: EXIT SUB
+    n = splitArgs(MID$(t$, 2), a$())
+    IF n < 1 OR n > 2 THEN throwError 2: EXIT SUB
+    src = evalNum(a$(1))
+    IF n = 2 THEN dst = evalNum(a$(2)) ELSE dst = _DEST
+    IF errorHappened THEN EXIT SUB
+    SELECT CASE form
+        CASE 0: _PUTIMAGE , src, dst
+        CASE 1: _PUTIMAGE (x1, y1), src, dst
+        CASE 2: _PUTIMAGE (x1, y1)-(x2, y2), src, dst
+    END SELECT
+END SUB
+
+SUB doSaveImage (r$)
+    '_SAVEIMAGE file$[, image]
+    DIM f$, n AS LONG
+    REDIM a$(0)
+    n = splitArgs(r$, a$())
+    IF n < 1 OR n > 2 THEN throwError 2: EXIT SUB
+    f$ = textArg$(a$(1))
+    IF errorHappened THEN EXIT SUB
+    IF n = 2 THEN _SAVEIMAGE f$, evalNum(a$(2)) ELSE _SAVEIMAGE f$, _DEST
+END SUB

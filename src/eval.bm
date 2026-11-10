@@ -30,7 +30,8 @@ SUB evaluate (e$, v AS valType)
     v.isText = false: v.n = 0: v.s = "": v.t = varTypeSINGLE
     pImp v
     IF evalErr = 0 AND tkPos <= tkCount THEN evalErr = 2 'leftover tokens
-    IF evalErr THEN throwError evalErr
+    IF evalErr > 0 THEN throwError evalErr
+    IF evalErr < 0 THEN errorHappened = true 'already reported (error inside a FUNCTION)
 END SUB
 
 '---------------------------------------------------------------- tokenizer
@@ -39,9 +40,11 @@ SUB addTok (kind AS _BYTE, text$)
     IF tkCount + 1 > UBOUND(tkKind) THEN
         REDIM _PRESERVE tkKind(tkCount + 50) AS _BYTE
         REDIM _PRESERVE tkText(tkCount + 50) AS STRING
+        REDIM _PRESERVE tkStart(tkCount + 50) AS LONG
     END IF
     tkKind(tkCount) = kind
     tkText(tkCount) = text$
+    tkStart(tkCount) = tkCurStart
 END SUB
 
 FUNCTION isIdentChar%% (c AS INTEGER)
@@ -53,10 +56,12 @@ SUB tokenize (e$)
     DIM w$, two$
 
     tkCount = 0
+    tkSrc$ = e$
     L = LEN(e$)
     i = 1
     DO WHILE i <= L
         c = ASC(e$, i)
+        tkCurStart = i
         SELECT CASE c
             CASE 32, 9
                 i = i + 1
@@ -143,6 +148,7 @@ SUB tokenize (e$)
                 END SELECT
         END SELECT
     LOOP
+    tkCurStart = L + 1
     addTok tkEND, "" 'sentinel
     tkCount = tkCount - 1
 END SUB
@@ -290,7 +296,7 @@ SUB pPow (v AS valType)
 END SUB
 
 SUB pAtom (v AS valType)
-    DIM idx AS LONG, name$
+    DIM idx AS LONG, name$, p AS LONG
 
     v.isText = false: v.s = "": v.n = 0: v.t = varTypeSINGLE
     SELECT CASE tkKind(tkPos)
@@ -313,6 +319,11 @@ SUB pAtom (v AS valType)
             idx = searchVar(name$)
             IF idx > 0 THEN
                 IF vars(idx).protected THEN pCall idx, v: EXIT SUB
+            END IF
+            p = findProc(name$, true)
+            IF p THEN pUserCall p, v: EXIT SUB
+            IF tkKind(tkPos) = tkLPAREN THEN pArrayElem name$, v: EXIT SUB
+            IF idx > 0 THEN
                 IF vars(idx).type = varTypeSTRING THEN
                     v.isText = true
                     v.s = strings(idx)
@@ -325,15 +336,121 @@ SUB pAtom (v AS valType)
                 v.t = detectType(name$)
                 IF v.t = varTypeSTRING THEN v.isText = true: v.t = varTypeSINGLE
             END IF
-            IF tkKind(tkPos) = tkLPAREN THEN evalErr = 9 'arrays not supported yet
         CASE ELSE
             evalErr = 2
     END SELECT
 END SUB
 
+SUB pArrayElem (name$, v AS valType)
+    'name(index, ...): the opening parenthesis is the current token
+    DIM ix(1 TO 8) AS LONG, n AS INTEGER, a AS LONG, e AS LONG, iv AS valType
+    tkPos = tkPos + 1
+    DO
+        IF n = 8 THEN evalErr = 9: EXIT SUB
+        pImp iv
+        IF evalErr THEN EXIT SUB
+        IF iv.isText THEN evalErr = 13: EXIT SUB
+        n = n + 1
+        ix(n) = iv.n
+        IF tkKind(tkPos) = tkCOMMA THEN
+            tkPos = tkPos + 1
+        ELSEIF tkKind(tkPos) = tkRPAREN THEN
+            tkPos = tkPos + 1
+            EXIT DO
+        ELSE
+            evalErr = 2: EXIT SUB
+        END IF
+    LOOP
+    a = findArray(name$)
+    IF a = 0 THEN a = autoDim(name$, n)
+    IF evalErr THEN EXIT SUB
+    e = elemIndex(a, ix(), n)
+    IF evalErr THEN EXIT SUB
+    IF vars(a).type = varTypeSTRING THEN
+        v.isText = true: v.s = poolStr(e)
+    ELSE
+        v.isText = false: v.n = poolNum(e): v.t = vars(a).type
+    END IF
+END SUB
+
+SUB pUserCall (p AS LONG, v AS valType)
+    'calls a user FUNCTION. The arguments are passed as source text, so
+    'variables can be passed by reference.
+    DIM n AS LONG, k AS LONG, depth AS LONG, i AS LONG
+    DIM saveCount AS LONG, savePos AS LONG, saveSrc$, saveErr AS INTEGER
+    REDIM at$(0)
+
+    IF tkKind(tkPos) = tkLPAREN THEN
+        tkPos = tkPos + 1
+        IF tkKind(tkPos) = tkRPAREN THEN
+            tkPos = tkPos + 1
+        ELSE
+            DO
+                k = tkPos
+                depth = 0
+                DO
+                    SELECT CASE tkKind(tkPos)
+                        CASE tkLPAREN: depth = depth + 1
+                        CASE tkRPAREN: IF depth = 0 THEN EXIT DO ELSE depth = depth - 1
+                        CASE tkCOMMA: IF depth = 0 THEN EXIT DO
+                        CASE tkEND: evalErr = 2: EXIT SUB
+                    END SELECT
+                    tkPos = tkPos + 1
+                LOOP
+                n = n + 1
+                REDIM _PRESERVE at$(1 TO n)
+                at$(n) = MID$(tkSrc$, tkStart(k), tkStart(tkPos) - tkStart(k))
+                tkPos = tkPos + 1
+                IF tkKind(tkPos - 1) = tkRPAREN THEN EXIT DO
+            LOOP
+        END IF
+    END IF
+
+    'the call evaluates its own expressions: keep ours
+    saveCount = tkCount: savePos = tkPos: saveSrc$ = tkSrc$: saveErr = evalErr
+    REDIM sk(saveCount + 1) AS _BYTE, st(saveCount + 1) AS STRING, ss(saveCount + 1) AS LONG
+    FOR i = 1 TO saveCount + 1
+        sk(i) = tkKind(i): st(i) = tkText(i): ss(i) = tkStart(i)
+    NEXT
+
+    callProc p, at$(), n, v
+
+    tkCount = saveCount: tkPos = savePos: tkSrc$ = saveSrc$: evalErr = saveErr
+    IF UBOUND(tkKind) < saveCount + 1 THEN
+        REDIM tkKind(saveCount + 1) AS _BYTE, tkText(saveCount + 1) AS STRING, tkStart(saveCount + 1) AS LONG
+    END IF
+    FOR i = 1 TO saveCount + 1
+        tkKind(i) = sk(i): tkText(i) = st(i): tkStart(i) = ss(i)
+    NEXT
+    IF errorHappened OR running = 0 THEN evalErr = -1
+END SUB
+
 SUB pCall (idx AS LONG, v AS valType)
     'built-in function call; the name token is already consumed
-    DIM a(1 TO 8) AS valType, na AS INTEGER
+    DIM a(1 TO 8) AS valType, na AS INTEGER, arr AS LONG, d AS LONG
+    IF vars(idx).key = "lbound" OR vars(idx).key = "ubound" THEN
+        'LBOUND(array[, dimension])
+        IF tkKind(tkPos) <> tkLPAREN OR tkKind(tkPos + 1) <> tkIDENT THEN evalErr = 2: EXIT SUB
+        arr = findArray(tkText(tkPos + 1))
+        IF arr = 0 THEN evalErr = 9: EXIT SUB
+        tkPos = tkPos + 2
+        d = 1
+        IF tkKind(tkPos) = tkCOMMA THEN
+            tkPos = tkPos + 1
+            pImp a(1)
+            IF evalErr THEN EXIT SUB
+            d = a(1).n
+        END IF
+        IF tkKind(tkPos) <> tkRPAREN THEN evalErr = 2: EXIT SUB
+        tkPos = tkPos + 1
+        IF d < 1 OR d > vars(arr).nDims THEN evalErr = 9: EXIT SUB
+        IF vars(idx).key = "lbound" THEN
+            retN v, dimLo(vars(arr).dimStart + d - 1), varTypeLONG
+        ELSE
+            retN v, dimHi(vars(arr).dimStart + d - 1), varTypeLONG
+        END IF
+        EXIT SUB
+    END IF
     IF tkKind(tkPos) = tkLPAREN THEN
         tkPos = tkPos + 1
         IF tkKind(tkPos) <> tkRPAREN THEN
@@ -841,6 +958,16 @@ SUB callBuiltin (nm$, a() AS valType, na AS INTEGER, v AS valType)
         CASE "_connected": retN v, _CONNECTED(argN(a(), na, 1)), varTypeLONG
         CASE "_connectionaddress", "_connectionaddress$": retS v, _CONNECTIONADDRESS$(argN(a(), na, 1))
 
+        CASE "_ceil": retN v, _CEIL(argN(a(), na, 1)), a(1).t
+        CASE "_min"
+            IF argN(a(), na, 1) <= argN(a(), na, 2) THEN x = argN(a(), na, 1) ELSE x = argN(a(), na, 2)
+            retN v, x, maxType(a(1).t, a(2).t)
+        CASE "_max"
+            IF argN(a(), na, 1) >= argN(a(), na, 2) THEN x = argN(a(), na, 1) ELSE x = argN(a(), na, 2)
+            retN v, x, maxType(a(1).t, a(2).t)
+        CASE "_bin$": q = argN(a(), na, 1): retS v, _BIN$(q)
+        CASE "_d2r": retN v, _D2R(argN(a(), na, 1)), mt
+        CASE "_r2d": retN v, _R2D(argN(a(), na, 1)), mt
         CASE ELSE
             'known name but not available as a function (statement or arrays)
             evalErr = 5

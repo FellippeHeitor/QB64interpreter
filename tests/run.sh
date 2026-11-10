@@ -1,7 +1,8 @@
 #!/bin/sh
 # Runs every tests/*.bas through the interpreter in headless mode and compares
 # its output with tests/<name>.expected. A tests/<name>.in file, if present,
-# is fed to the program as keyboard input.
+# is fed to the program as keyboard input. tests/*.script files are typed at
+# the interpreter's prompt instead.
 #
 # usage: tests/run.sh [path/to/basiccmdline]
 cd "$(dirname "$0")" || exit 1
@@ -21,6 +22,20 @@ for f in *.bas; do
     else
         fail=$((fail + 1))
         echo "FAIL: $n"
+        printf '%s\n' "$got" | diff "$n.expected" - | head -20
+    fi
+done
+# *.script: lines typed at the prompt (the interpreter runs from the repo root)
+for f in *.script; do
+    [ -f "$f" ] || continue
+    n=${f%.script}
+    [ -f "$n.expected" ] || continue
+    got=$(timeout 20 "$bin" -script "$here/$f" 2>&1)
+    if [ "$got" = "$(cat "$n.expected")" ]; then
+        pass=$((pass + 1))
+    else
+        fail=$((fail + 1))
+        echo "FAIL: $n (script)"
         printf '%s\n' "$got" | diff "$n.expected" - | head -20
     fi
 done

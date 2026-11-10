@@ -1,0 +1,665 @@
+'exec.bm - runs a compiled program
+'
+'runFrom steps through the statement list from a given statement. Each
+'statement sets pcNext when it jumps (loops, IF, GOTO, ...). SUB and
+'FUNCTION calls run their body with a nested runFrom, so calls can happen
+'anywhere, including in the middle of an expression.
+
+SUB runFrom (startPc AS LONG)
+    DIM pc AS LONG, depth AS LONG
+    depth = callDepth
+    pc = startPc
+    DO
+        IF pc < 1 OR pc > stmtCount THEN
+            IF depth = 0 THEN running = false 'end of program
+            EXIT DO
+        END IF
+
+        keyhit = _KEYHIT
+        IF (keyhit = 99 OR keyhit = 67) AND (_KEYDOWN(100305) OR _KEYDOWN(100306)) THEN
+            PRINT "Break."
+            running = false
+            _KEYCLEAR
+            EXIT DO
+        END IF
+
+        pcCur = pc
+        pcNext = pc + 1
+        currentLine = stmts(pc).lineNo
+        errorHappened = false
+        execStmt pc
+        IF runtimeErr THEN
+            throwError runtimeErr
+            runtimeErr = 0
+        END IF
+        IF running = 0 THEN EXIT DO
+        IF exitProcFlag THEN
+            exitProcFlag = false
+            EXIT DO
+        END IF
+        pc = pcNext
+    LOOP
+END SUB
+
+SUB execStmt (pc AS LONG)
+    DIM t$, b AS LONG, cv AS _FLOAT
+
+    t$ = stmts(pc).text
+    SELECT CASE stmts(pc).kind
+        CASE stOTHER
+            execSimple t$
+
+        CASE stSIF 'single-line IF: jump past its statements when false
+            cv = evalNum(t$)
+            IF errorHappened THEN EXIT SUB
+            IF cv = 0 THEN pcNext = stmts(pc).match
+        CASE stSKIP
+            pcNext = stmts(pc).match
+
+        CASE stIF
+            cv = evalNum(MID$(t$, 4, LEN(t$) - 8))
+            IF errorHappened THEN EXIT SUB
+            IF cv = 0 THEN
+                'find the first branch that applies
+                b = stmts(pc).nextBranch
+                DO
+                    IF stmts(b).kind = stELSEIF THEN
+                        t$ = stmts(b).text
+                        currentLine = stmts(b).lineNo
+                        cv = evalNum(MID$(t$, 8, LEN(t$) - 12))
+                        IF errorHappened THEN EXIT SUB
+                        IF cv <> 0 THEN pcNext = b + 1: EXIT SUB
+                        b = stmts(b).nextBranch
+                    ELSE 'ELSE or END IF
+                        pcNext = b + 1
+                        EXIT SUB
+                    END IF
+                LOOP
+            END IF
+        CASE stELSEIF, stELSE 'end of the branch that ran
+            pcNext = stmts(pc).endIdx + 1
+
+        CASE stDO
+            IF stmts(pc).hasCond THEN
+                IF loopGoesOn(MID$(t$, 3)) = 0 THEN pcNext = stmts(pc).match + 1
+            END IF
+        CASE stLOOP
+            IF stmts(pc).hasCond THEN
+                IF loopGoesOn(MID$(t$, 5)) THEN pcNext = stmts(pc).match + 1
+            ELSE
+                pcNext = stmts(pc).match 'the DO checks its own condition
+            END IF
+
+        CASE stWHILE
+            cv = evalNum(MID$(t$, 7))
+            IF errorHappened THEN EXIT SUB
+            IF cv = 0 THEN pcNext = stmts(pc).match + 1
+        CASE stWEND
+            pcNext = stmts(pc).match
+
+        CASE stFOR: execFor pc
+        CASE stNEXT: execNext pc
+
+        CASE stSELECT: execSelect pc
+        CASE stCASE 'end of the CASE that ran
+            pcNext = stmts(pc).endIdx + 1
+
+        CASE stSUB 'SUB/FUNCTION bodies only run when called
+            pcNext = stmts(pc).match + 1
+        CASE stENDSUB
+            exitProcFlag = true
+    END SELECT
+END SUB
+
+FUNCTION loopGoesOn%% (c$)
+    'c$ is "WHILE condition" or "UNTIL condition"
+    DIM t$, cv AS _FLOAT
+    t$ = _TRIM$(c$)
+    cv = evalNum(MID$(t$, 6))
+    IF errorHappened THEN EXIT FUNCTION
+    IF UCASE$(LEFT$(t$, 5)) = "UNTIL" THEN loopGoesOn%% = (cv = 0) ELSE loopGoesOn%% = (cv <> 0)
+END FUNCTION
+
+SUB execFor (pc AS LONG)
+    DIM t$, u$, i AS LONG, j AS LONG, l AS LONG, nm$, vi AS LONG, initial AS _FLOAT
+
+    t$ = stmts(pc).text: u$ = UCASE$(t$)
+    i = Find(1, u$, "=")
+    j = Find(i + 1, u$, " TO ")
+    l = Find(j + 4, u$, " STEP ")
+    IF i = 0 OR j = 0 THEN throwError 2: EXIT SUB
+    nm$ = _TRIM$(MID$(t$, 5, i - 5))
+    IF validName(nm$) = 0 THEN throwError 2: EXIT SUB
+    vi = targetScalar(nm$)
+    IF evalErr THEN throwError evalErr: EXIT SUB
+    IF vars(vi).type = varTypeSTRING THEN throwError 13: EXIT SUB
+
+    initial = evalNum(MID$(t$, i + 1, j - i - 1))
+    IF l THEN
+        forFinal(pc) = evalNum(MID$(t$, j + 4, l - j - 4))
+        forStep(pc) = evalNum(MID$(t$, l + 6))
+    ELSE
+        forFinal(pc) = evalNum(MID$(t$, j + 4))
+        forStep(pc) = 1
+    END IF
+    IF errorHappened THEN EXIT SUB
+
+    'QB64 converts the start, limit and step to the loop variable's type
+    nums(vi) = coerce(initial, vars(vi).type)
+    forFinal(pc) = coerce(forFinal(pc), vars(vi).type)
+    forStep(pc) = coerce(forStep(pc), vars(vi).type)
+    forVar(pc) = vi
+    IF forDone(pc) THEN 'empty range: skip the body
+        forVar(pc) = 0
+        pcNext = stmts(pc).match + 1
+    END IF
+END SUB
+
+FUNCTION forDone%% (f AS LONG)
+    'true when the loop variable of FOR statement f is past its limit
+    IF forStep(f) < 0 THEN
+        forDone%% = (nums(forVar(f)) < forFinal(f))
+    ELSE
+        forDone%% = (nums(forVar(f)) > forFinal(f))
+    END IF
+END FUNCTION
+
+SUB execNext (pc AS LONG)
+    DIM blk AS LONG, k AS LONG, vi AS LONG
+    blk = stmts(pc).match
+    FOR k = 1 TO stmts(pc).nVars 'NEXT i, j steps i, then j
+        IF forVar(blk) = 0 THEN throwErrorMsg "NEXT without FOR": EXIT SUB
+        vi = forVar(blk)
+        nums(vi) = coerce(nums(vi) + forStep(blk), vars(vi).type)
+        IF forDone(blk) = 0 THEN pcNext = blk + 1: EXIT SUB 'next iteration
+        forVar(blk) = 0
+        blk = stmts(blk).encFor
+    NEXT
+END SUB
+
+SUB execSelect (pc AS LONG)
+    DIM v AS valType, b AS LONG, ct$
+    evaluate MID$(stmts(pc).text, 13), v
+    IF errorHappened THEN EXIT SUB
+    b = stmts(pc).nextBranch
+    DO WHILE b
+        IF stmts(b).kind <> stCASE THEN pcNext = b + 1: EXIT SUB 'END SELECT
+        ct$ = _TRIM$(MID$(stmts(b).text, 5))
+        currentLine = stmts(b).lineNo
+        IF UCASE$(ct$) = "ELSE" THEN pcNext = b + 1: EXIT SUB
+        IF caseMatches(v, ct$) THEN pcNext = b + 1: EXIT SUB
+        IF errorHappened THEN EXIT SUB
+        b = stmts(b).nextBranch
+    LOOP
+END SUB
+
+FUNCTION caseMatches%% (v AS valType, list$)
+    'CASE 1, 2   CASE 3 TO 5   CASE IS > 10   CASE "a" TO "m"
+    DIM i AS LONG, n AS LONG, it$, iu$, op$, k AS LONG
+    DIM a AS valType, b AS valType
+    REDIM items$(0)
+    n = splitArgs(list$, items$())
+    FOR i = 1 TO n
+        it$ = items$(i): iu$ = UCASE$(it$)
+        IF LEFT$(iu$, 3) = "IS " THEN
+            it$ = _TRIM$(MID$(it$, 4))
+            op$ = LEFT$(it$, 2)
+            IF op$ <> "<>" AND op$ <> "<=" AND op$ <> ">=" THEN op$ = LEFT$(it$, 1)
+            IF INSTR("=<>", LEFT$(op$, 1)) = 0 THEN throwError 2: EXIT FUNCTION
+            evaluate MID$(it$, LEN(op$) + 1), a
+            IF errorHappened THEN EXIT FUNCTION
+            IF compareVals(v, a, op$) THEN caseMatches%% = true: EXIT FUNCTION
+        ELSE
+            k = Find(1, iu$, " TO ")
+            IF k THEN
+                evaluate LEFT$(it$, k - 1), a
+                IF errorHappened THEN EXIT FUNCTION
+                evaluate MID$(it$, k + 4), b
+                IF errorHappened THEN EXIT FUNCTION
+                IF compareVals(v, a, ">=") THEN
+                    IF compareVals(v, b, "<=") THEN caseMatches%% = true: EXIT FUNCTION
+                END IF
+            ELSE
+                evaluate it$, a
+                IF errorHappened THEN EXIT FUNCTION
+                IF compareVals(v, a, "=") THEN caseMatches%% = true: EXIT FUNCTION
+            END IF
+        END IF
+        IF errorHappened THEN EXIT FUNCTION
+    NEXT
+END FUNCTION
+
+FUNCTION compareVals%% (x AS valType, y AS valType, op$)
+    DIM c AS valType
+    c.isText = x.isText: c.s = x.s: c.n = x.n: c.t = x.t
+    evalErr = 0
+    binaryOp c, y, op$
+    IF evalErr THEN throwError evalErr: EXIT FUNCTION
+    compareVals%% = (c.n <> 0)
+END FUNCTION
+
+'---------------------------------------------------------------- simple statements
+FUNCTION firstWord$ (t$)
+    DIM i AS LONG
+    i = 1
+    DO WHILE i <= LEN(t$)
+        IF isIdentChar(ASC(t$, i)) = 0 THEN EXIT DO
+        i = i + 1
+    LOOP
+    firstWord$ = LEFT$(t$, i - 1)
+END FUNCTION
+
+SUB execSimple (t$)
+    DIM w$, kw$, rest$, n AS LONG, i AS LONG, u$
+
+    IF LEFT$(t$, 1) = "?" THEN doPrintStmt MID$(t$, 2): EXIT SUB
+    w$ = firstWord$(t$)
+    kw$ = UCASE$(w$)
+    rest$ = _TRIM$(MID$(t$, LEN(w$) + 1))
+    u$ = UCASE$(rest$)
+
+    IF kw$ = "MID" AND LEFT$(rest$, 2) = "$(" THEN doMidStmt MID$(rest$, 2): EXIT SUB
+    'a variable that looks like a keyword: "color$ = ...", "line = 1"
+    n = LEN(w$) + 1
+    IF LEFT$(rest$, 1) = "=" THEN execAssignOrCall t$: EXIT SUB
+    IF n <= LEN(t$) THEN
+        IF INSTR("$%&!~`", MID$(t$, n, 1)) > 0 THEN execAssignOrCall t$: EXIT SUB
+    END IF
+
+    SELECT CASE kw$
+        CASE "PRINT", "LPRINT": doPrintStmt rest$
+        CASE "INPUT"
+            IF LEFT$(rest$, 1) = "#" THEN doFileInput rest$, false ELSE doInput rest$, false
+        CASE "LINE"
+            IF LEFT$(u$, 6) = "INPUT " OR LEFT$(u$, 6) = "INPUT#" THEN
+                rest$ = _TRIM$(MID$(rest$, 6))
+                IF LEFT$(rest$, 1) = "#" THEN doFileInput rest$, true ELSE doInput rest$, true
+            ELSE
+                doLine rest$
+            END IF
+        CASE "WRITE": doWrite rest$
+        CASE "LET": execAssignOrCall rest$
+        CASE "DIM", "STATIC": doDim rest$, 0
+        CASE "REDIM": doDim rest$, 1
+        CASE "SHARED": doDim rest$, 2
+        CASE "CONST": doConst rest$
+        CASE "SWAP": doSwap rest$
+        CASE "ERASE": doErase rest$
+        CASE "GOTO": doGoto rest$
+        CASE "GOSUB": doGosub rest$
+        CASE "RETURN": doReturn rest$
+        CASE "ON": doOn rest$
+        CASE "END", "STOP": IF rest$ = "" THEN running = false ELSE throwError 2
+        CASE "SYSTEM": SYSTEM
+        CASE "EXIT": doExit u$
+        CASE "_CONTINUE": doContinue
+        CASE "CALL": doCall rest$
+        CASE "READ": doRead rest$
+        CASE "RESTORE": doRestore rest$
+        CASE "OPEN": doOpen rest$
+        CASE "CLOSE": doClose rest$
+        CASE "CLEAR": IF callDepth = 0 THEN clearVars
+        CASE "ERROR": throwError evalNum(rest$)
+
+        'screen
+        CASE "CLS": doCls rest$
+        CASE "COLOR": doColor rest$
+        CASE "LOCATE": doLocate rest$
+        CASE "SCREEN": SCREEN evalNum(rest$)
+        CASE "WIDTH": doWidth rest$
+        CASE "PALETTE": doPalette rest$
+        CASE "PCOPY": doTwoNums rest$, 1
+        CASE "KEY"
+            IF u$ = "ON" THEN
+                KEY ON: screenKeyStatus = true
+            ELSEIF u$ = "OFF" THEN
+                KEY OFF: screenKeyStatus = false
+            ELSE
+                throwError 2
+            END IF
+        CASE "_BLINK"
+            IF u$ = "ON" THEN
+                _BLINK ON
+            ELSEIF u$ = "OFF" THEN
+                _BLINK OFF
+            ELSE
+                throwError 2
+            END IF
+        CASE "_TITLE": _TITLE textArg$(rest$)
+        CASE "_SCREENMOVE"
+            IF u$ = "_MIDDLE" THEN _SCREENMOVE _MIDDLE ELSE doTwoNums rest$, 2
+        CASE "_DISPLAY": _DISPLAY
+        CASE "_AUTODISPLAY": _AUTODISPLAY
+        CASE "_LIMIT": _LIMIT evalNum(rest$)
+        CASE "_DELAY": _DELAY evalNum(rest$)
+        CASE "_FULLSCREEN"
+            SELECT CASE u$
+                CASE "", "_STRETCH": _FULLSCREEN _STRETCH
+                CASE "_OFF": _FULLSCREEN _OFF
+                CASE "_SQUAREPIXELS": _FULLSCREEN _SQUAREPIXELS
+                CASE ELSE: throwError 2
+            END SELECT
+        CASE "_DEST": _DEST evalNum(rest$)
+        CASE "_SOURCE": _SOURCE evalNum(rest$)
+        CASE "_FREEIMAGE": _FREEIMAGE evalNum(rest$)
+        CASE "_FONT": _FONT evalNum(rest$)
+        CASE "_CLEARCOLOR": _CLEARCOLOR evalNum(rest$)
+        CASE "_MOUSESHOW": _MOUSESHOW
+        CASE "_MOUSEHIDE": _MOUSEHIDE
+        CASE "_MOUSEMOVE": doTwoNums rest$, 3
+        CASE "_KEYCLEAR": _KEYCLEAR
+        CASE "_SAVEIMAGE": doSaveImage rest$
+        CASE "_PRINTSTRING": doPrintString rest$
+        CASE "_PUTIMAGE": doPutImage rest$
+        CASE "CIRCLE": doCircle rest$
+        CASE "PSET": doPset rest$, false
+        CASE "PRESET": doPset rest$, true
+        CASE "PAINT": doPaint rest$
+        CASE "DRAW": DRAW textArg$(rest$)
+
+        'sound
+        CASE "BEEP": BEEP
+        CASE "SOUND": doSound rest$
+        CASE "PLAY": PLAY textArg$(rest$)
+        CASE "_SNDPLAY": _SNDPLAY evalNum(rest$)
+        CASE "_SNDSTOP": _SNDSTOP evalNum(rest$)
+        CASE "_SNDLOOP": _SNDLOOP evalNum(rest$)
+        CASE "_SNDCLOSE": _SNDCLOSE evalNum(rest$)
+
+        'system
+        CASE "SLEEP": IF rest$ = "" THEN SLEEP ELSE SLEEP evalNum(rest$)
+        CASE "RANDOMIZE"
+            IF rest$ = "" THEN
+                RANDOMIZE TIMER
+            ELSEIF LEFT$(u$, 6) = "USING " THEN
+                RANDOMIZE USING evalNum(MID$(rest$, 7))
+            ELSE
+                RANDOMIZE evalNum(rest$)
+            END IF
+        CASE "FILES": IF rest$ = "" THEN FILES ELSE FILES fileArg$(rest$)
+        CASE "CHDIR": CHDIR fileArg$(rest$)
+        CASE "MKDIR": MKDIR fileArg$(rest$)
+        CASE "RMDIR": RMDIR fileArg$(rest$)
+        CASE "KILL": KILL fileArg$(rest$)
+        CASE "NAME"
+            n = Find(1, u$, " AS ")
+            IF n = 0 THEN throwError 2 ELSE NAME fileArg$(LEFT$(rest$, n - 1)) AS fileArg$(MID$(rest$, n + 4))
+        CASE "SHELL": IF rest$ = "" THEN SHELL ELSE SHELL textArg$(rest$)
+        CASE "_ECHO": _ECHO textArg$(rest$)
+
+        CASE ELSE
+            execAssignOrCall t$
+    END SELECT
+END SUB
+
+FUNCTION textArg$ (e$)
+    DIM v AS valType
+    evaluate e$, v
+    IF errorHappened THEN EXIT FUNCTION
+    IF v.isText = 0 THEN throwError 13: EXIT FUNCTION
+    textArg$ = v.s
+END FUNCTION
+
+SUB execAssignOrCall (t$)
+    DIM e AS LONG, lhs$, lv AS lvType, v AS valType, w$, p AS LONG, rest$
+
+    e = Find(1, t$, "=")
+    IF e > 0 THEN
+        lhs$ = _TRIM$(LEFT$(t$, e - 1))
+        p = INSTR(lhs$, "(")
+        IF p THEN w$ = _TRIM$(LEFT$(lhs$, p - 1)) ELSE w$ = lhs$
+        IF validName(w$) THEN
+            parseLValue lhs$, lv
+            IF evalErr > 0 THEN throwError evalErr: EXIT SUB
+            IF evalErr THEN EXIT SUB
+            evaluate MID$(t$, e + 1), v
+            IF errorHappened THEN EXIT SUB
+            evalErr = 0
+            setLV lv, v
+            IF evalErr THEN throwError evalErr
+            EXIT SUB
+        END IF
+    END IF
+
+    'SUB call without CALL: "name arg1, arg2"
+    w$ = firstWord$(t$)
+    p = findProc(w$, false)
+    IF p THEN
+        rest$ = _TRIM$(MID$(t$, LEN(w$) + 1))
+        callSubText p, rest$, false
+        EXIT SUB
+    END IF
+    throwError 2
+END SUB
+
+SUB doCall (rest$)
+    DIM w$, p AS LONG, a$
+    w$ = firstWord$(rest$)
+    p = findProc(w$, false)
+    IF p = 0 THEN throwErrorMsg "SUB not found: " + w$: EXIT SUB
+    a$ = _TRIM$(MID$(rest$, LEN(w$) + 1))
+    callSubText p, a$, true
+END SUB
+
+SUB callSubText (p AS LONG, argText$, viaCall AS _BYTE)
+    DIM a$, n AS LONG, v AS valType
+    REDIM argList$(0)
+    a$ = _TRIM$(argText$)
+    'CALL name(a, b): the parentheses hold the arguments. Without CALL,
+    '"name (a)" passes a by value, but "name(a, b)" is an argument list.
+    IF LEFT$(a$, 1) = "(" THEN
+        IF matchParen&(a$, 1) = LEN(a$) THEN
+            IF viaCall OR splitArgs(MID$(a$, 2, LEN(a$) - 2), argList$()) > 1 THEN a$ = MID$(a$, 2, LEN(a$) - 2)
+        END IF
+    END IF
+    n = splitArgs(a$, argList$())
+    callProc p, argList$(), n, v
+END SUB
+
+FUNCTION matchParen& (t$, openPos AS LONG)
+    'position of the ")" matching the "(" at openPos (0 if none)
+    DIM i AS LONG, depth AS LONG, quote AS _BYTE, c AS INTEGER
+    FOR i = openPos TO LEN(t$)
+        c = ASC(t$, i)
+        IF c = 34 THEN quote = NOT quote
+        IF quote = 0 THEN
+            IF c = 40 THEN depth = depth + 1
+            IF c = 41 THEN
+                depth = depth - 1
+                IF depth = 0 THEN matchParen& = i: EXIT FUNCTION
+            END IF
+        END IF
+    NEXT
+END FUNCTION
+
+'---------------------------------------------------------------- SUB / FUNCTION calls
+SUB callProc (p AS LONG, argText$(), nArgs AS LONG, result AS valType)
+    DIM np AS LONG, i AS LONG, spec$, su$, pn$, pt AS INTEGER, k AS LONG, a$
+    DIM saveFrame AS LONG, savePrefix$, saveProc AS LONG, saveRet AS LONG
+    DIM savePcCur AS LONG, savePcNext AS LONG, saveLine AS LONG
+    DIM varMark AS LONG, poolMark AS LONG, dimMark AS LONG, j AS LONG, fs AS LONG, fe AS LONG
+    REDIM pspec$(0)
+
+    np = splitArgs(procs(p).params, pspec$())
+    IF np <> nArgs THEN throwError 1003: EXIT SUB
+    IF callDepth >= 1000 THEN throwErrorMsg "Too many nested calls": EXIT SUB
+
+    REDIM pName$(np), pType(np) AS INTEGER, pArr(np) AS _BYTE, pRef(np) AS LONG
+    REDIM pVal(np) AS valType
+
+    'arguments are worked out in the caller's scope
+    FOR i = 1 TO np
+        spec$ = _TRIM$(pspec$(i)): su$ = UCASE$(spec$)
+        IF LEFT$(su$, 6) = "BYVAL " THEN spec$ = _TRIM$(MID$(spec$, 7)): su$ = UCASE$(spec$): k = -1 ELSE k = 0
+        pt = -1
+        j = Find(1, su$, " AS ")
+        IF j THEN
+            pt = typeFromText(MID$(spec$, j + 4))
+            IF pt < 0 THEN throwError 1004: EXIT SUB
+            spec$ = _TRIM$(LEFT$(spec$, j - 1))
+        END IF
+        IF RIGHT$(spec$, 2) = "()" THEN pArr(i) = true: spec$ = _TRIM$(LEFT$(spec$, LEN(spec$) - 2))
+        IF validName(spec$) = 0 THEN throwError 2: EXIT SUB
+        IF pt < 0 THEN pt = detectType(spec$)
+        pName$(i) = spec$: pType(i) = pt
+
+        a$ = _TRIM$(argText$(i))
+        IF pArr(i) THEN
+            IF RIGHT$(a$, 2) = "()" THEN a$ = _TRIM$(LEFT$(a$, LEN(a$) - 2))
+            pRef(i) = findArray(a$)
+            IF pRef(i) = 0 THEN throwError 9: EXIT SUB
+        ELSEIF k = 0 AND validName(a$) THEN
+            'a plain variable is passed by reference (when the types match)
+            IF findProc(a$, true) = 0 THEN
+                j = searchVar(a$)
+                IF j = 0 THEN j = newVar(a$, detectType(a$), false, (frameId = 0))
+                IF vars(j).protected = 0 AND vars(j).isConst = 0 AND vars(j).type = pt THEN pRef(i) = j
+            END IF
+        END IF
+        IF pRef(i) = 0 AND pArr(i) = 0 THEN
+            evaluate a$, pVal(i)
+            IF errorHappened THEN EXIT SUB
+            IF (pt = varTypeSTRING) <> (pVal(i).isText <> 0) THEN throwError 13: EXIT SUB
+        END IF
+    NEXT
+
+    'save the caller's state
+    saveFrame = frameId: savePrefix$ = framePrefix$: saveProc = curProc: saveRet = retVar
+    savePcCur = pcCur: savePcNext = pcNext: saveLine = currentLine
+    varMark = totalVars: poolMark = poolTop: dimMark = dimTop
+    fs = procs(p).startIdx: fe = procs(p).endIdx
+    REDIM sfv(fs TO fe) AS LONG, sff(fs TO fe) AS _FLOAT, sfs(fs TO fe) AS _FLOAT
+    FOR j = fs TO fe: sfv(j) = forVar(j): sff(j) = forFinal(j): sfs(j) = forStep(j): NEXT
+
+    'new scope with the parameters
+    frameSerial = frameSerial + 1
+    frameId = frameSerial
+    framePrefix$ = "#" + LTRIM$(STR$(frameId)) + ":"
+    curProc = p
+    callDepth = callDepth + 1
+    FOR i = 1 TO np
+        IF pArr(i) OR pRef(i) THEN
+            j = newVar(pName$(i), pType(i), pArr(i), false)
+            vars(j).refIdx = pRef(i)
+        ELSE
+            j = newVar(pName$(i), pType(i), false, false)
+            IF pVal(i).isText THEN strings(j) = pVal(i).s ELSE nums(j) = coerce(pVal(i).n, pType(i))
+        END IF
+    NEXT
+    IF procs(p).isFunc THEN retVar = newVar("#ret", procs(p).retType, false, false) ELSE retVar = 0
+
+    runFrom fs + 1
+
+    'the FUNCTION's value
+    IF procs(p).isFunc THEN
+        IF procs(p).retType = varTypeSTRING THEN
+            result.isText = true: result.s = strings(retVar): result.n = 0
+        ELSE
+            result.isText = false: result.s = "": result.n = nums(retVar): result.t = procs(p).retType
+        END IF
+    END IF
+
+    'back to the caller
+    dropVarsAbove varMark
+    j = poolMark: IF poolGlobalHigh > j THEN j = poolGlobalHigh
+    FOR i = j + 1 TO poolTop: poolStr(i) = "": NEXT
+    poolTop = j
+    j = dimMark: IF dimGlobalHigh > j THEN j = dimGlobalHigh
+    dimTop = j
+    FOR j = fs TO fe: forVar(j) = sfv(j): forFinal(j) = sff(j): forStep(j) = sfs(j): NEXT
+    DO WHILE gosubTop > 0
+        IF gosubDepth(gosubTop) < callDepth THEN EXIT DO
+        gosubTop = gosubTop - 1
+    LOOP
+    callDepth = callDepth - 1
+    frameId = saveFrame: framePrefix$ = savePrefix$: curProc = saveProc: retVar = saveRet
+    pcCur = savePcCur: pcNext = savePcNext: currentLine = saveLine
+    exitProcFlag = false
+END SUB
+
+'---------------------------------------------------------------- jumps
+FUNCTION labelTarget& (l$)
+    DIM i AS LONG
+    i = findLabel(l$)
+    IF i = 0 THEN throwErrorMsg "Label not defined: " + _TRIM$(l$)
+    labelTarget& = i
+END FUNCTION
+
+SUB doGoto (l$)
+    DIM i AS LONG
+    i = labelTarget(l$)
+    IF i THEN pcNext = i
+END SUB
+
+SUB doGosub (l$)
+    DIM i AS LONG
+    i = labelTarget(l$)
+    IF i = 0 THEN EXIT SUB
+    gosubTop = gosubTop + 1
+    IF gosubTop > UBOUND(gosubStack) THEN
+        IF gosubTop > 10000 THEN throwErrorMsg "Too many nested GOSUBs": EXIT SUB
+        REDIM _PRESERVE gosubStack(gosubTop + 100) AS LONG
+        REDIM _PRESERVE gosubDepth(gosubTop + 100) AS LONG
+    END IF
+    gosubStack(gosubTop) = pcNext
+    gosubDepth(gosubTop) = callDepth
+    pcNext = i
+END SUB
+
+SUB doReturn (l$)
+    DIM ok AS _BYTE
+    IF gosubTop > 0 THEN ok = (gosubDepth(gosubTop) = callDepth)
+    IF ok = 0 THEN throwError 3: EXIT SUB
+    pcNext = gosubStack(gosubTop)
+    gosubTop = gosubTop - 1
+    IF LEN(l$) THEN doGoto l$
+END SUB
+
+SUB doOn (rest$)
+    'ON n GOTO a, b, c   /   ON n GOSUB a, b, c
+    DIM u$, k AS LONG, isSub AS _BYTE, n AS LONG, c AS LONG
+    REDIM lbl$(0)
+    u$ = UCASE$(rest$)
+    IF LEFT$(u$, 6) = "ERROR " THEN throwErrorMsg "ON ERROR is not supported yet": EXIT SUB
+    k = Find(1, u$, " GOTO ")
+    IF k = 0 THEN k = Find(1, u$, " GOSUB "): isSub = true
+    IF k = 0 THEN throwError 2: EXIT SUB
+    n = evalNum(LEFT$(rest$, k - 1))
+    IF errorHappened THEN EXIT SUB
+    IF isSub THEN c = splitArgs(MID$(rest$, k + 7), lbl$()) ELSE c = splitArgs(MID$(rest$, k + 6), lbl$())
+    IF n < 1 OR n > c THEN EXIT SUB 'out of range: carry on
+    IF isSub THEN doGosub lbl$(n) ELSE doGoto lbl$(n)
+END SUB
+
+SUB doExit (u$)
+    DIM blk AS LONG
+    SELECT CASE u$
+        CASE "FOR"
+            blk = stmts(pcCur).encFor
+            IF blk = 0 THEN throwErrorMsg "EXIT FOR without FOR": EXIT SUB
+            forVar(blk) = 0
+            pcNext = stmts(blk).match + 1
+        CASE "DO"
+            blk = stmts(pcCur).encDo
+            IF blk = 0 THEN throwErrorMsg "EXIT DO without DO": EXIT SUB
+            pcNext = stmts(blk).match + 1
+        CASE "WHILE"
+            blk = stmts(pcCur).encWhile
+            IF blk = 0 THEN throwErrorMsg "EXIT WHILE without WHILE": EXIT SUB
+            pcNext = stmts(blk).match + 1
+        CASE "SUB", "FUNCTION"
+            exitProcFlag = true
+        CASE ELSE
+            throwError 2
+    END SELECT
+END SUB
+
+SUB doContinue
+    'run the LOOP/NEXT/WEND of the innermost loop
+    DIM blk AS LONG
+    blk = stmts(pcCur).encDo
+    IF stmts(pcCur).encFor > blk THEN blk = stmts(pcCur).encFor
+    IF stmts(pcCur).encWhile > blk THEN blk = stmts(pcCur).encWhile
+    IF blk = 0 THEN throwErrorMsg "_CONTINUE outside a loop": EXIT SUB
+    pcNext = stmts(blk).match
+END SUB
