@@ -2,7 +2,7 @@
 .LIST
  1 PRINT "hello"
  2 FOR i = 1 TO 3
- 3 PRINT i
+ 3     PRINT i
  4 NEXT
 End of file - 
 .RUN
@@ -14,14 +14,14 @@ hello
 .LIST
  1 PRINT "hello"
  2 FOR i = 1 TO 3
- 3     PRINT i
+ 3         PRINT i
  4 NEXT
 End of file - 
 .EDIT
 .LIST
  1 PRINT "hello"
  2 FOR i = 1 TO 3
- 3 PRINT i
+ 3     PRINT i
  4 NEXT
 End of file - 
 .EDIT
@@ -30,28 +30,28 @@ editor: 2 replaced
 .LIST
  1 ?  "hello"
  2 FOR i = 1 TO 3
- 3     ?  i
+ 3         ?  i
  4 NEXT
 End of file - 
 .EDIT
 .LIST
  1 ?  "hello"
  2 FOR i = 1 TO 3
- 3     ?  i
+ 3         ?  i
  4 NEXT
  5 ?  "hello"
  6 FOR i = 1 TO 3
- 7     ?  i
+ 7         ?  i
  8 NEXT
 End of file - 
 .EDIT 2
 .LIST
  1 ?  "hello"
  2 NEXT
- 3     '?  i
+ 3         '?  i
  4 '?  "hello"
  5 'FOR i = 1 TO 3
- 6     ?  i
+ 6         ?  i
  7 NEXT
 End of file - 
 .EDIT
@@ -59,10 +59,10 @@ End of file -
  1 ?"x"
  2 x"
  3 NEXT?"
- 4     '?  i
+ 4         '?  i
  5 '?  "hello"
  6 'FOR i = 1 TO 3
- 7     ?  i
+ 7         ?  i
  8 NEXT
 End of file - 
 .EDIT
@@ -74,7 +74,7 @@ editor: Division by zero on line 2
 editor: Division by zero on line 2
 .LIST
  1 FOR i = 1 TO 2
- 2 PRINT 10 / (i - 2)*
+ 2     PRINT 10 / (i - 2)*
  3 NEXT
 End of file - 
 .EDIT
@@ -84,7 +84,7 @@ editor: Saved tests/_editor_tmp.bas
 Loaded.
 .LIST
  1 FOR i = 1 TO 2
- 2 PRINT 10 / (i - 2)
+ 2     PRINT 10 / (i - 2)
  3 NEXT
 End of file - tests/_editor_tmp.bas
 .KILL "tests/_editor_tmp.bas"
@@ -95,6 +95,53 @@ editor: Nothing to undo
 editor: Nothing to undo
 .LIST
  1 FOR i = 1 TO 2
- 2 PRINT 10 / (i - 2)
+ 2     PRINT 10 / (i - 2)
  3 NEXT
 End of file - tests/_editor_tmp.bas
+.NEW
+.LIST
+  1 SUB s (n)
+  2     IF n > 0 THEN 'block
+  3         FOR i = 1 TO n
+  4             DO WHILE x < i
+  5                 x = x + 1
+  6             LOOP
+  7         NEXT
+  8         SELECT CASE n
+  9             CASE 1
+ 10                 PRINT "one"
+ 11             CASE ELSE
+ 12                 PRINT "many"
+ 13         END SELECT
+ 14     ELSEIF n < 0 THEN
+ 15         IF n = -1 THEN PRINT "single-line IF"
+ 16         DO: x = x - 1: LOOP UNTIL x < 0
+ 17     ELSE
+ 18         PRINT "zero"
+ 19     END IF
+End of file - 
+.EDIT
+.LIST
+  1 SUB s (n)
+  2     IF n > 0 THEN 'block
+  3         FOR i = 1 TO n
+  4             DO WHILE x < i
+  5                 x = x + 1
+  6             LOOP
+  7         NEXT
+  8         SELECT CASE n
+  9             CASE 1
+ 10                 PRINT "one"
+ 11             CASE ELSE
+ 12                 PRINT "many"
+ 13         END SELECT
+ 14     ELSEIF n < 0 THEN
+ 15         IF n = -1 THEN PRINT "single-line IF"
+ 16         DO: x = x - 1: LOOP UNTIL x < 0
+ 17     ELSE
+ 18         PRINT "zero"
+ 19     END IF
+ 20     WHILE 0
+ 21     WEND
+ 22 END SUB
+End of file - 

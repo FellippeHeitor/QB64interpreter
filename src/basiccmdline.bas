@@ -3,6 +3,9 @@ OPTION _EXPLICIT
 $CONSOLE
 'the window starts hidden; it's only shown when not running headless (tests)
 $SCREENHIDE
+'the window can only be resized if this is set at compile time; it's
+'switched on just while the editor is open
+$RESIZE:ON
 
 CONST true = -1, false = NOT true
 
@@ -65,6 +68,7 @@ END IF
 
 setSoftKeys true
 KEY ON
+_RESIZE OFF
 
 screenKeyStatus = true
 FOR i = 1 TO 26: defType(i) = varTypeSINGLE: NEXT

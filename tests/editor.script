@@ -35,3 +35,9 @@ KILL "tests/_editor_tmp.bas"
 EDIT
 x{ctrl+f}zzz{enter}{ctrl+h}nope{enter}{enter}{ctrl+z}{ctrl+z}{ctrl+z}{esc}
 LIST
+NEW
+SUB s (n){enter}IF n > 0 THEN 'block{enter}FOR i = 1 TO n{enter}DO WHILE x < i{enter}x = x + 1{enter}LOOP{enter}NEXT{enter}SELECT CASE n{enter}CASE 1{enter}PRINT "one"{enter}CASE ELSE{enter}PRINT "many"{enter}END SELECT{enter}ELSEIF n < 0 THEN{enter}IF n = -1 THEN PRINT "single-line IF"{enter}DO: x = x - 1: LOOP UNTIL x < 0{enter}ELSE{enter}PRINT "zero"{enter}END IF{down}{up}{esc}
+LIST
+EDIT
+{ctrl+end}{enter}END SUB{up}{end}{enter}WHILE 0{enter}WEND{esc}
+LIST
