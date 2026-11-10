@@ -1,0 +1,881 @@
+'Editor menus, dialogs, scroll bar and output screen (used by editor.bm).
+'
+'In -script mode nothing is drawn, but menus and dialogs still read their
+'keys from the script, so tests can drive them.
+
+'---------------------------------------------------------------- menus
+SUB edInitMenus
+    DIM t$
+    t$ = CHR$(9)
+    edMenuN = 5
+    edMenuTitle$(1) = "&File": edMenuTitle$(2) = "&Edit": edMenuTitle$(3) = "&Search"
+    edMenuTitle$(4) = "&Run": edMenuTitle$(5) = "&Help"
+    edAddItem 1, "&New" + t$ + "Ctrl+N" + t$ + "new"
+    edAddItem 1, "&Open..." + t$ + "Ctrl+O" + t$ + "open"
+    edAddItem 1, "&Save" + t$ + "Ctrl+S" + t$ + "save"
+    edAddItem 1, "Save &As..." + t$ + "Ctrl+Shift+S" + t$ + "saveas"
+    edAddItem 1, "-"
+    edAddItem 1, "E&xit Editor" + t$ + "Esc" + t$ + "exit"
+    edAddItem 2, "&Undo" + t$ + "Ctrl+Z" + t$ + "undo"
+    edAddItem 2, "&Redo" + t$ + "Ctrl+Y" + t$ + "redo"
+    edAddItem 2, "-"
+    edAddItem 2, "Cu&t" + t$ + "Ctrl+X" + t$ + "cut"
+    edAddItem 2, "&Copy" + t$ + "Ctrl+C" + t$ + "copy"
+    edAddItem 2, "&Paste" + t$ + "Ctrl+V" + t$ + "paste"
+    edAddItem 2, "Select &All" + t$ + "Ctrl+A" + t$ + "selall"
+    edAddItem 2, "-"
+    edAddItem 2, "&Duplicate Lines" + t$ + "Ctrl+D" + t$ + "dup"
+    edAddItem 2, "De&lete Lines" + t$ + "Ctrl+K" + t$ + "delline"
+    edAddItem 2, "Co&mment/Uncomment" + t$ + "Ctrl+/" + t$ + "comment"
+    edAddItem 2, "&Indent" + t$ + "Tab" + t$ + "indent"
+    edAddItem 2, "U&nindent" + t$ + "Shift+Tab" + t$ + "outdent"
+    edAddItem 3, "&Find..." + t$ + "Ctrl+F" + t$ + "find"
+    edAddItem 3, "Find &Next" + t$ + "F3" + t$ + "next"
+    edAddItem 3, "Find &Previous" + t$ + "Shift+F3" + t$ + "prev"
+    edAddItem 3, "&Replace..." + t$ + "Ctrl+H" + t$ + "replace"
+    edAddItem 3, "-"
+    edAddItem 3, "&Go to Line..." + t$ + "Ctrl+G" + t$ + "goto"
+    edAddItem 4, "&Start" + t$ + "F5" + t$ + "run"
+    edAddItem 4, "&Output Screen" + t$ + "F4" + t$ + "output"
+    edAddItem 5, "&Keys" + t$ + "F1" + t$ + "keys"
+    edAddItem 5, "&About" + t$ + "" + t$ + "about"
+END SUB
+
+SUB edAddItem (m AS INTEGER, s$)
+    edMenuCount(m) = edMenuCount(m) + 1
+    edMenuItem$(m, edMenuCount(m)) = s$
+END SUB
+
+FUNCTION edPart$ (s$, n AS INTEGER)
+    'the n-th tab-separated part of s$
+    DIM i AS INTEGER, a AS LONG, b AS LONG
+    a = 1
+    FOR i = 1 TO n - 1
+        a = INSTR(a, s$, CHR$(9))
+        IF a = 0 THEN EXIT FUNCTION
+        a = a + 1
+    NEXT
+    b = INSTR(a, s$, CHR$(9))
+    IF b = 0 THEN b = LEN(s$) + 1
+    edPart$ = MID$(s$, a, b - a)
+END FUNCTION
+
+FUNCTION edHotkey% (label$)
+    'lower-case code of the letter after & in label$
+    DIM i AS LONG
+    i = INSTR(label$, "&")
+    IF i > 0 AND i < LEN(label$) THEN edHotkey% = ASC(LCASE$(MID$(label$, i + 1, 1)))
+END FUNCTION
+
+FUNCTION edPlain$ (label$)
+    DIM i AS LONG
+    i = INSTR(label$, "&")
+    IF i THEN edPlain$ = LEFT$(label$, i - 1) + MID$(label$, i + 1) ELSE edPlain$ = label$
+END FUNCTION
+
+SUB edPutHot (col AS LONG, row AS LONG, label$, fg AS INTEGER, hot AS INTEGER, bg AS INTEGER)
+    'prints label$ with its &-marked letter in another colour
+    DIM i AS LONG
+    edColor fg, bg
+    edPut col, row, edPlain$(label$)
+    i = INSTR(label$, "&")
+    IF i THEN edColor hot, bg: edPut col + i - 1, row, MID$(label$, i + 1, 1)
+END SUB
+
+FUNCTION edMenuX% (m AS INTEGER)
+    'column of menu m's title in the menu bar
+    DIM i AS INTEGER, x AS INTEGER
+    x = 2
+    FOR i = 1 TO m - 1: x = x + LEN(edPlain$(edMenuTitle$(i))) + 2: NEXT
+    edMenuX% = x
+END FUNCTION
+
+FUNCTION edMenuAt% (x AS LONG)
+    DIM i AS INTEGER, a AS INTEGER
+    FOR i = 1 TO edMenuN
+        a = edMenuX%(i)
+        IF x >= a AND x < a + LEN(edPlain$(edMenuTitle$(i))) + 2 THEN edMenuAt% = i: EXIT FUNCTION
+    NEXT
+END FUNCTION
+
+SUB edDrawMenuBar (openM AS INTEGER)
+    DIM i AS INTEGER, f$
+    edColor EC_BARTEXT, EC_BAR
+    edPut 1, 1, SPACE$(edCols)
+    FOR i = 1 TO edMenuN
+        IF i = openM THEN
+            edColor EC_BRIGHT, EC_SEL
+            edPut edMenuX%(i), 1, SPACE$(LEN(edPlain$(edMenuTitle$(i))) + 2)
+            edPutHot edMenuX%(i) + 1, 1, edMenuTitle$(i), EC_BRIGHT, EC_LABEL, EC_SEL
+        ELSE
+            edPutHot edMenuX%(i) + 1, 1, edMenuTitle$(i), EC_BARTEXT, EC_HOTKEY, EC_BAR
+        END IF
+    NEXT
+    'the file name on the right
+    f$ = loadedFile$
+    IF f$ = "" THEN f$ = "Untitled"
+    f$ = MID$(f$, _INSTRREV(f$, "/") + 1)
+    IF edModified%% THEN f$ = f$ + " *"
+    IF LEN(f$) + 2 < edCols - edMenuX%(edMenuN + 1) THEN
+        edColor EC_BARTEXT, EC_BAR
+        edPut edCols - LEN(f$), 1, f$
+    END IF
+END SUB
+
+SUB edMenuGeom (m AS INTEGER, lft AS LONG, top AS LONG, w AS LONG, h AS LONG)
+    DIM i AS INTEGER, n AS LONG
+    w = 0
+    FOR i = 1 TO edMenuCount(m)
+        n = LEN(edPlain$(edPart$(edMenuItem$(m, i), 1))) + LEN(edPart$(edMenuItem$(m, i), 2)) + 7
+        IF n > w THEN w = n
+    NEXT
+    h = edMenuCount(m) + 2
+    lft = edMenuX%(m) - 1: top = 2
+    IF lft + w - 1 > edCols THEN lft = edCols - w + 1
+    IF lft < 1 THEN lft = 1
+END SUB
+
+SUB edDrawMenu (m AS INTEGER, sel AS INTEGER)
+    DIM lft AS LONG, top AS LONG, w AS LONG, h AS LONG, i AS INTEGER, s$, sc$, fg AS INTEGER, bg AS INTEGER, hot AS INTEGER
+    edMenuGeom m, lft, top, w, h
+    edBox lft, top, w, h, ""
+    FOR i = 1 TO edMenuCount(m)
+        s$ = edMenuItem$(m, i)
+        IF s$ = "-" THEN
+            edColor EC_BARTEXT, EC_BAR
+            edPut lft, top + i, CHR$(195) + STRING$(w - 2, 196) + CHR$(180)
+        ELSE
+            IF i = sel THEN fg = EC_BRIGHT: bg = EC_SEL: hot = EC_LABEL ELSE fg = EC_BARTEXT: bg = EC_BAR: hot = EC_HOTKEY
+            sc$ = edPart$(s$, 2)
+            edColor fg, bg
+            edPut lft + 1, top + i, SPACE$(w - 2)
+            edPutHot lft + 2, top + i, edPart$(s$, 1), fg, hot, bg
+            edPut lft + w - 2 - LEN(sc$), top + i, sc$
+        END IF
+    NEXT
+END SUB
+
+FUNCTION edMenuStep% (m AS INTEGER, sel AS INTEGER, dir AS INTEGER)
+    'the next selectable item from sel in direction dir (wrapping)
+    DIM i AS INTEGER, n AS INTEGER
+    i = sel
+    FOR n = 1 TO edMenuCount(m)
+        i = i + dir
+        IF i < 1 THEN i = edMenuCount(m)
+        IF i > edMenuCount(m) THEN i = 1
+        IF edMenuItem$(m, i) <> "-" THEN edMenuStep% = i: EXIT FUNCTION
+    NEXT
+    edMenuStep% = sel
+END FUNCTION
+
+SUB edMenu (startM AS INTEGER)
+    'opens a menu; arrows, Enter, the underlined letters or the mouse choose
+    DIM m AS INTEGER, sel AS INTEGER, e AS LONG, cmd$, i AS INTEGER, t AS INTEGER
+    DIM lft AS LONG, top AS LONG, w AS LONG, h AS LONG, k AS LONG, shownM AS INTEGER, shownSel AS INTEGER
+
+    m = startM: sel = edMenuStep%(m, 0, 1)
+    edUiStart
+    edUiHover = -1
+    DO
+        IF NOT headless AND (m <> shownM OR sel <> shownSel OR e = -2) THEN
+            edDraw: edDrawMenuBar m: edDrawMenu m, sel: _DISPLAY
+            shownM = m: shownSel = sel
+        END IF
+        e = edUiWait&
+        edMenuGeom m, lft, top, w, h
+        SELECT CASE e
+            CASE -1, -3 'mouse press / move
+                IF edMouseY = 1 THEN
+                    t = edMenuAt%(edMouseX)
+                    IF t = m AND e = -1 THEN EXIT DO
+                    IF t > 0 AND t <> m THEN m = t: sel = edMenuStep%(m, 0, 1)
+                    IF t = 0 AND e = -1 THEN EXIT DO
+                ELSEIF edMouseX > lft AND edMouseX < lft + w - 1 AND edMouseY > top AND edMouseY < top + h - 1 THEN
+                    i = edMouseY - top
+                    IF edMenuItem$(m, i) <> "-" THEN
+                        sel = i
+                        IF e = -1 THEN cmd$ = edPart$(edMenuItem$(m, sel), 3): EXIT DO
+                    END IF
+                ELSEIF e = -1 THEN
+                    EXIT DO
+                END IF
+            CASE EK_ESC, EK_F10, EK_MENU: EXIT DO
+            CASE EK_LEFT: m = m - 1: IF m < 1 THEN m = edMenuN
+                sel = edMenuStep%(m, 0, 1)
+            CASE EK_RIGHT: m = m + 1: IF m > edMenuN THEN m = 1
+                sel = edMenuStep%(m, 0, 1)
+            CASE EK_UP: sel = edMenuStep%(m, sel, -1)
+            CASE EK_DOWN: sel = edMenuStep%(m, sel, 1)
+            CASE EK_HOME: sel = edMenuStep%(m, 0, 1)
+            CASE EK_END: sel = edMenuStep%(m, edMenuCount(m) + 1, -1)
+            CASE EK_ENTER: cmd$ = edPart$(edMenuItem$(m, sel), 3): EXIT DO
+            CASE 65 TO 90, 97 TO 122
+                k = e OR 32
+                IF edAlt THEN 'Alt+letter: another menu
+                    FOR i = 1 TO edMenuN
+                        IF edHotkey%(edMenuTitle$(i)) = k THEN m = i: sel = edMenuStep%(m, 0, 1)
+                    NEXT
+                ELSE
+                    FOR i = 1 TO edMenuCount(m)
+                        IF edHotkey%(edPart$(edMenuItem$(m, i), 1)) = k THEN cmd$ = edPart$(edMenuItem$(m, i), 3): EXIT FOR
+                    NEXT
+                    IF LEN(cmd$) THEN EXIT DO
+                END IF
+        END SELECT
+    LOOP
+    edUiHover = 0
+    edUiEnd
+    IF LEN(cmd$) THEN edCommand cmd$
+END SUB
+
+FUNCTION edMenuForKey% (k AS LONG)
+    'the menu whose title has letter k underlined
+    DIM i AS INTEGER
+    FOR i = 1 TO edMenuN
+        IF edHotkey%(edMenuTitle$(i)) = (k OR 32) THEN edMenuForKey% = i
+    NEXT
+END FUNCTION
+
+SUB edCommand (c$)
+    SELECT CASE c$
+        CASE "new": edNewFile
+        CASE "open": edOpenFile
+        CASE "save": edSave 0
+        CASE "saveas": edSave -1
+        CASE "exit": edQuit = 1
+        CASE "undo": edUndoStep
+        CASE "redo": edRedoStep
+        CASE "cut": edCopy -1
+        CASE "copy": edCopy 0
+        CASE "paste": edPaste
+        CASE "selall": edSelectAll
+        CASE "dup": edDuplicate
+        CASE "delline": edDeleteLines
+        CASE "comment": edToggleComment
+        CASE "indent": edIndent 1
+        CASE "outdent": edIndent -1
+        CASE "find": edFindPrompt
+        CASE "next": IF edFind$ = "" THEN edFindPrompt ELSE edFindNext 0
+        CASE "prev": IF edFind$ = "" THEN edFindPrompt ELSE edFindNext -1
+        CASE "replace": edReplacePrompt
+        CASE "goto": edGotoPrompt
+        CASE "run": edQuit = 2
+        CASE "output": edShowOutput
+        CASE "keys": edHelp
+        CASE "about": edAbout
+    END SELECT
+    edEnsureVisible
+END SUB
+
+'---------------------------------------------------------------- modal input
+SUB edUiStart
+    'call when a menu or dialog opens: a mouse button already held down
+    'doesn't count as a click
+    edModal = edModal + 1
+    IF headless THEN EXIT SUB
+    edUiPrevB = _MOUSEBUTTON(1)
+END SUB
+
+SUB edUiEnd
+    'the editor ignores the mouse until a button still held is released
+    edModal = edModal - 1
+    IF headless THEN EXIT SUB
+    IF edUiPrevB THEN edMouseDown = 2
+END SUB
+
+FUNCTION edUiWait&
+    'waits for input in a menu or dialog: a key code, -1 for a mouse press,
+    '-5 for a release, -2 when the window was resized, -3 when the mouse
+    'moved to another cell (only while edUiHover is set: menus follow the
+    'mouse, dialogs only while dragging), -4 when a text field's cursor
+    'should blink (while edUiBlink is set)
+    DIM e AS LONG, b AS _BYTE, x AS LONG, y AS LONG
+    IF headless THEN
+        e = edGetKey&
+        IF edScriptEnd THEN e = EK_ESC
+        edUiWait& = e
+        EXIT FUNCTION
+    END IF
+    DO
+        e = edGetKey&
+        IF e THEN edUiWait& = e: EXIT FUNCTION
+        DO WHILE _MOUSEINPUT
+            x = _MOUSEX \ 8 + 1: y = _MOUSEY \ 16 + 1
+            edMousePY = _MOUSEY
+            b = _MOUSEBUTTON(1)
+            IF b AND edUiPrevB = 0 THEN
+                edUiPrevB = b: edMouseX = x: edMouseY = y
+                edUiWait& = -1: EXIT FUNCTION
+            END IF
+            IF b = 0 AND edUiPrevB THEN
+                edUiPrevB = 0: edMouseX = x: edMouseY = y
+                edUiWait& = -5: EXIT FUNCTION
+            END IF
+            IF x <> edMouseX OR y <> edMouseY THEN
+                edMouseX = x: edMouseY = y
+                IF edUiHover THEN edUiWait& = -3: EXIT FUNCTION
+            END IF
+        LOOP
+        IF edResized%% THEN edUiWait& = -2: EXIT FUNCTION
+        IF edUiBlink AND edBlinkPhase%% <> edBlinkOn THEN edUiWait& = -4: EXIT FUNCTION
+        _LIMIT 60
+    LOOP
+END FUNCTION
+
+'---------------------------------------------------------------- dialogs
+SUB edBox (lft AS LONG, top AS LONG, w AS LONG, h AS LONG, title$)
+    'a framed box with a drop shadow
+    DIM i AS LONG
+    LINE (lft * 8, top * 16)-((lft + w) * 8 - 1, (top + h) * 16 - 1), _RGBA32(0, 0, 0, 110), BF
+    edColor EC_BARTEXT, EC_BAR
+    edPut lft, top, CHR$(218) + STRING$(w - 2, 196) + CHR$(191)
+    FOR i = 1 TO h - 2
+        edPut lft, top + i, CHR$(179) + SPACE$(w - 2) + CHR$(179)
+    NEXT
+    edPut lft, top + h - 1, CHR$(192) + STRING$(w - 2, 196) + CHR$(217)
+    IF LEN(title$) THEN edPut lft + (w - LEN(title$) - 2) \ 2, top, " " + title$ + " "
+END SUB
+
+'buttons: a raised face with a half-block shadow; while pressed the face
+'moves into the shadow's place, so it looks pushed in
+FUNCTION edBtnW& (c$)
+    edBtnW& = LEN(edPlain$(c$)) + 4
+END FUNCTION
+
+SUB edButton (x AS LONG, y AS LONG, c$, highlight AS _BYTE, pressed AS _BYTE)
+    DIM w AS LONG, bx AS LONG, bg AS INTEGER
+    w = edBtnW&(c$)
+    edColor EC_BARTEXT, EC_BAR
+    edPut x, y, SPACE$(w + 1): edPut x, y + 1, SPACE$(w + 1)
+    bx = x: IF pressed THEN bx = x + 1
+    IF highlight THEN bg = EC_SEL ELSE bg = EC_BUTTON
+    edColor EC_BRIGHT, bg
+    edPut bx, y, SPACE$(w)
+    edPutHot bx + 2, y, c$, EC_BRIGHT, EC_LABEL, bg
+    IF pressed = 0 THEN
+        edColor EC_BARTEXT, EC_BAR
+        edPut x + w, y, CHR$(220)
+        edPut x + 1, y + 1, STRING$(w, 223)
+    END IF
+END SUB
+
+FUNCTION edBtnHit%% (x AS LONG, y AS LONG, c$)
+    edBtnHit%% = (edMouseY = y AND edMouseX >= x AND edMouseX <= x + edBtnW&(c$))
+END FUNCTION
+
+SUB edLayoutButtons (b$(), nb AS INTEGER, lft AS LONG, w AS LONG, bx() AS LONG)
+    'centres nb buttons in a box, three columns apart
+    DIM i AS INTEGER, total AS LONG, x AS LONG
+    FOR i = 1 TO nb: total = total + edBtnW&(b$(i)) + 3: NEXT
+    total = total - 2
+    x = lft + (w - total) \ 2
+    FOR i = 1 TO nb: bx(i) = x: x = x + edBtnW&(b$(i)) + 3: NEXT
+END SUB
+
+FUNCTION edButtonsW& (b$(), nb AS INTEGER)
+    DIM i AS INTEGER, total AS LONG
+    FOR i = 1 TO nb: total = total + edBtnW&(b$(i)) + 3: NEXT
+    edButtonsW& = total - 2
+END FUNCTION
+
+'text fields: cur is the cursor, anc the other end of the selection
+SUB edFieldKey (v$, cur AS LONG, anc AS LONG, k AS LONG)
+    DIM a AS LONG, b AS LONG, c$
+    a = cur: b = anc
+    IF a > b THEN SWAP a, b
+    SELECT CASE k
+        CASE EK_LEFT, EK_RIGHT, EK_HOME, EK_END
+            IF edShift = 0 AND a <> b AND (k = EK_LEFT OR k = EK_RIGHT) THEN
+                IF k = EK_LEFT THEN cur = a ELSE cur = b
+                anc = cur
+                EXIT SUB
+            END IF
+            SELECT CASE k
+                CASE EK_LEFT
+                    IF edCtrl THEN
+                        DO WHILE cur > 1 AND edIsWordChar%%(MID$(v$, cur - 1, 1)) = 0: cur = cur - 1: LOOP
+                        DO WHILE cur > 1 AND edIsWordChar%%(MID$(v$, cur - 1, 1)): cur = cur - 1: LOOP
+                    ELSEIF cur > 1 THEN
+                        cur = cur - 1
+                    END IF
+                CASE EK_RIGHT
+                    IF edCtrl THEN
+                        DO WHILE cur <= LEN(v$) AND edIsWordChar%%(MID$(v$, cur, 1)): cur = cur + 1: LOOP
+                        DO WHILE cur <= LEN(v$) AND edIsWordChar%%(MID$(v$, cur, 1)) = 0: cur = cur + 1: LOOP
+                    ELSEIF cur <= LEN(v$) THEN
+                        cur = cur + 1
+                    END IF
+                CASE EK_HOME: cur = 1
+                CASE EK_END: cur = LEN(v$) + 1
+            END SELECT
+            IF edShift = 0 THEN anc = cur
+        CASE EK_BKSP
+            IF a <> b THEN
+                v$ = LEFT$(v$, a - 1) + MID$(v$, b): cur = a
+            ELSEIF cur > 1 THEN
+                v$ = LEFT$(v$, cur - 2) + MID$(v$, cur): cur = cur - 1
+            END IF
+            anc = cur
+        CASE EK_DEL
+            IF a <> b THEN
+                v$ = LEFT$(v$, a - 1) + MID$(v$, b): cur = a
+            ELSE
+                v$ = LEFT$(v$, cur - 1) + MID$(v$, cur + 1)
+            END IF
+            anc = cur
+        CASE ELSE
+            IF edCtrl THEN
+                SELECT CASE k
+                    CASE 97 'Ctrl+A
+                        anc = 1: cur = LEN(v$) + 1
+                    CASE 99, 120 'Ctrl+C, Ctrl+X
+                        IF a <> b THEN
+                            edClipLine$ = ""
+                            edSetClip MID$(v$, a, b - a)
+                            IF k = 120 THEN v$ = LEFT$(v$, a - 1) + MID$(v$, b): cur = a: anc = a
+                        END IF
+                    CASE 118 'Ctrl+V: the clipboard's first line
+                        c$ = edGetClip$
+                        IF INSTR(c$, CHR$(10)) THEN c$ = LEFT$(c$, INSTR(c$, CHR$(10)) - 1)
+                        IF INSTR(c$, CHR$(13)) THEN c$ = LEFT$(c$, INSTR(c$, CHR$(13)) - 1)
+                        v$ = LEFT$(v$, a - 1) + c$ + MID$(v$, b): cur = a + LEN(c$): anc = cur
+                END SELECT
+            ELSEIF (k >= 32 AND k <= 126) OR (k >= 128 AND k <= 255) THEN
+                v$ = LEFT$(v$, a - 1) + CHR$(k) + MID$(v$, b): cur = a + 1: anc = cur
+            END IF
+    END SELECT
+END SUB
+
+FUNCTION edFieldShift& (v$, cur AS LONG, fw AS LONG)
+    'how far a field's text is scrolled so the cursor shows
+    IF cur > fw THEN edFieldShift& = cur - fw
+END FUNCTION
+
+SUB edDrawField (x AS LONG, y AS LONG, fw AS LONG, v$, cur AS LONG, anc AS LONG, focused AS _BYTE)
+    DIM sh AS LONG, a AS LONG, b AS LONG
+    sh = edFieldShift&(v$, cur, fw)
+    edColor EC_TEXT, EC_BG
+    edPut x, y, LEFT$(MID$(v$, sh + 1, fw) + SPACE$(fw), fw)
+    IF focused THEN
+        a = cur: b = anc
+        IF a > b THEN SWAP a, b
+        IF a < sh + 1 THEN a = sh + 1
+        IF b > sh + fw + 1 THEN b = sh + fw + 1
+        IF b > a THEN edColor EC_BRIGHT, EC_SEL: edPut x + a - sh - 1, y, MID$(v$, a, b - a)
+        IF edBlinkPhase%% THEN edBar x + cur - 1 - sh, y, EC_BRIGHT
+    END IF
+END SUB
+
+FUNCTION edDialog% (title$, n AS INTEGER, labels$(), vals$())
+    'a box with n text fields and OK / Cancel; returns -1 for OK.
+    'Tab moves between fields; Enter moves on, and on the last field is OK.
+    'Each field starts with its text selected, so typing replaces it.
+    DIM focus AS INTEGER, cur(1 TO 8) AS LONG, anc(1 TO 8) AS LONG
+    DIM lw AS LONG, w AS LONG, h AS LONG, lft AS LONG, top AS LONG, fx AS LONG, fw AS LONG
+    DIM e AS LONG, i AS INTEGER, p AS LONG, result AS INTEGER, done AS _BYTE
+    DIM b$(1 TO 2), bx(1 TO 2) AS LONG, by AS LONG, pressed AS INTEGER, dragging AS INTEGER
+    DIM clickT AS DOUBLE, clickX AS LONG, clickY AS LONG
+
+    b$(1) = "OK": b$(2) = "Cancel"
+    FOR i = 1 TO n
+        IF LEN(labels$(i)) > lw THEN lw = LEN(labels$(i))
+        anc(i) = 1: cur(i) = LEN(vals$(i)) + 1
+    NEXT
+    focus = 1
+    edUiStart
+    edUiBlink = -1: edBlinkT = TIMER
+    DO
+        'layout (again after a resize)
+        w = lw + 36: IF w > edCols - 2 THEN w = edCols - 2
+        h = 5 + 2 * n
+        lft = (edCols - w) \ 2 + 1: top = (edRows - h) \ 2 + 1
+        IF top < 1 THEN top = 1
+        fx = lft + 3 + lw: fw = lft + w - 3 - fx + 1
+        by = top + h - 3
+        edLayoutButtons b$(), 2, lft, w, bx()
+        IF NOT headless THEN
+            edDraw
+            edBox lft, top, w, h, title$
+            FOR i = 1 TO n
+                edColor EC_BARTEXT, EC_BAR
+                edPut lft + 2, top + 2 * i, labels$(i)
+                edDrawField fx, top + 2 * i, fw, vals$(i), cur(i), anc(i), (i = focus)
+            NEXT
+            edBlinkOn = edBlinkPhase%%
+            FOR i = 1 TO 2
+                edButton bx(i), by, b$(i), (i = 1), (i = pressed AND (edBtnHit%%(bx(i), by, b$(i)) OR done))
+            NEXT
+            _DISPLAY
+            IF done THEN _DELAY .12 'let a key press show on the button
+        END IF
+        IF done THEN EXIT DO
+
+        e = edUiWait&
+        IF e <> -4 THEN edBlinkT = TIMER 'solid while typing or clicking
+        SELECT CASE e
+            CASE -1 'press
+                pressed = 0
+                FOR i = 1 TO 2
+                    IF edBtnHit%%(bx(i), by, b$(i)) THEN pressed = i: edUiHover = -1
+                NEXT
+                FOR i = 1 TO n
+                    IF edMouseY = top + 2 * i AND edMouseX >= fx AND edMouseX < fx + fw THEN
+                        focus = i
+                        p = edFieldShift&(vals$(i), cur(i), fw) + edMouseX - fx + 1
+                        IF p > LEN(vals$(i)) + 1 THEN p = LEN(vals$(i)) + 1
+                        cur(i) = p
+                        IF _KEYDOWN(100303) = 0 AND _KEYDOWN(100304) = 0 THEN anc(i) = p
+                        IF TIMER - clickT < .4 AND TIMER >= clickT AND edMouseX = clickX AND edMouseY = clickY THEN
+                            'double-click: the word
+                            DO WHILE anc(i) > 1 AND edIsWordChar%%(MID$(vals$(i), anc(i) - 1, 1)): anc(i) = anc(i) - 1: LOOP
+                            DO WHILE cur(i) <= LEN(vals$(i)) AND edIsWordChar%%(MID$(vals$(i), cur(i), 1)): cur(i) = cur(i) + 1: LOOP
+                            clickT = 0
+                        ELSE
+                            clickT = TIMER: clickX = edMouseX: clickY = edMouseY
+                            dragging = i: edUiHover = -1
+                        END IF
+                    END IF
+                NEXT
+            CASE -3 'move while a button or text is held
+                IF dragging THEN
+                    p = edFieldShift&(vals$(dragging), cur(dragging), fw) + edMouseX - fx + 1
+                    IF p < 1 THEN p = 1
+                    IF p > LEN(vals$(dragging)) + 1 THEN p = LEN(vals$(dragging)) + 1
+                    cur(dragging) = p
+                END IF
+            CASE -5 'release: a button counts if the pointer is still on it
+                IF pressed THEN
+                    IF edBtnHit%%(bx(pressed), by, b$(pressed)) THEN result = (pressed = 1): EXIT DO
+                END IF
+                pressed = 0: dragging = 0: edUiHover = 0
+            CASE EK_ESC: result = 0: EXIT DO
+            CASE EK_ENTER
+                IF focus < n THEN focus = focus + 1 ELSE result = -1: pressed = 1: done = -1
+            CASE EK_TAB
+                IF edShift THEN focus = focus - 1 ELSE focus = focus + 1
+                IF focus < 1 THEN focus = n
+                IF focus > n THEN focus = 1
+            CASE EK_UP: IF focus > 1 THEN focus = focus - 1
+            CASE EK_DOWN: IF focus < n THEN focus = focus + 1
+            CASE IS > 0
+                edFieldKey vals$(focus), cur(focus), anc(focus), e
+        END SELECT
+    LOOP
+    edUiBlink = 0: edUiHover = 0
+    edUiEnd
+    edDialog% = result
+END FUNCTION
+
+FUNCTION edInputBox$ (title$, label$, default$)
+    'one-field dialog; sets edPromptCancel when cancelled
+    DIM l$(1 TO 1), v$(1 TO 1)
+    l$(1) = label$: v$(1) = default$
+    edPromptCancel = (edDialog%(title$, 1, l$(), v$()) = 0)
+    edInputBox$ = v$(1)
+END FUNCTION
+
+FUNCTION edConfirm% (title$, msg$, buttons$, avoidRow AS LONG)
+    'a message with buttons (e.g. "Yes|No|Cancel"). Returns the chosen
+    'button's first letter in upper case, or 27 for Esc.
+    DIM b$(1 TO 6), bx(1 TO 6) AS LONG, nb AS INTEGER, i AS INTEGER, a AS LONG, j AS LONG, focus AS INTEGER
+    DIM ln$(1 TO 6), nl AS INTEGER, words$, wd$, bw AS LONG, w AS LONG, h AS LONG
+    DIM lft AS LONG, top AS LONG, by AS LONG, e AS LONG, result AS LONG, pressed AS INTEGER, done AS _BYTE
+
+    a = 1
+    DO
+        j = INSTR(a, buttons$ + "|", "|")
+        IF j = 0 OR nb = 6 THEN EXIT DO
+        nb = nb + 1: b$(nb) = "&" + MID$(buttons$, a, j - a): a = j + 1
+        IF a > LEN(buttons$) THEN EXIT DO
+    LOOP
+    bw = edButtonsW&(b$(), nb)
+    focus = 1
+    edUiStart
+    DO
+        'wrap the message to the box
+        w = LEN(msg$) + 6
+        IF w < bw + 6 THEN w = bw + 6
+        IF w < 34 THEN w = 34
+        IF w > edCols - 2 THEN w = edCols - 2
+        nl = 0: ln$(1) = "": words$ = msg$ + " "
+        DO WHILE LEN(words$) AND nl < 6
+            j = INSTR(words$, " ")
+            wd$ = LEFT$(words$, j - 1): words$ = MID$(words$, j + 1)
+            IF nl = 0 THEN nl = 1
+            IF LEN(ln$(nl)) + LEN(wd$) + 1 > w - 4 AND LEN(ln$(nl)) > 0 THEN
+                IF nl = 6 THEN EXIT DO
+                nl = nl + 1: ln$(nl) = ""
+            END IF
+            IF LEN(ln$(nl)) THEN ln$(nl) = ln$(nl) + " "
+            ln$(nl) = ln$(nl) + wd$
+        LOOP
+        h = nl + 6
+        lft = (edCols - w) \ 2 + 1: top = (edRows - h) \ 2 + 1
+        IF avoidRow >= top AND avoidRow < top + h THEN 'keep a found match in view
+            IF avoidRow > edRows \ 2 THEN top = 2 ELSE top = edRows - h
+        END IF
+        IF top < 1 THEN top = 1
+        by = top + h - 3
+        edLayoutButtons b$(), nb, lft, w, bx()
+
+        IF NOT headless THEN
+            edDraw
+            edBox lft, top, w, h, title$
+            edColor EC_BARTEXT, EC_BAR
+            FOR i = 1 TO nl: edPut lft + 2, top + 1 + i, ln$(i): NEXT
+            FOR i = 1 TO nb
+                edButton bx(i), by, b$(i), (i = focus), (i = pressed AND (edBtnHit%%(bx(i), by, b$(i)) OR done))
+            NEXT
+            _DISPLAY
+            IF done THEN _DELAY .12
+        END IF
+        IF done THEN EXIT DO
+
+        e = edUiWait&
+        SELECT CASE e
+            CASE -1
+                pressed = 0
+                FOR i = 1 TO nb
+                    IF edBtnHit%%(bx(i), by, b$(i)) THEN pressed = i: focus = i: edUiHover = -1
+                NEXT
+            CASE -5
+                IF pressed THEN
+                    IF edBtnHit%%(bx(pressed), by, b$(pressed)) THEN result = ASC(UCASE$(edPlain$(b$(pressed)))): EXIT DO
+                END IF
+                pressed = 0: edUiHover = 0
+            CASE EK_ESC: result = 27: EXIT DO
+            CASE EK_ENTER, 32: pressed = focus: result = ASC(UCASE$(edPlain$(b$(focus)))): done = -1
+            CASE EK_LEFT: IF focus > 1 THEN focus = focus - 1
+            CASE EK_RIGHT: IF focus < nb THEN focus = focus + 1
+            CASE EK_TAB
+                IF edShift THEN focus = focus - 1 ELSE focus = focus + 1
+                IF focus < 1 THEN focus = nb
+                IF focus > nb THEN focus = 1
+            CASE 65 TO 90, 97 TO 122
+                FOR i = 1 TO nb
+                    IF ASC(UCASE$(edPlain$(b$(i)))) = (e AND NOT 32) THEN
+                        focus = i: pressed = i: result = ASC(UCASE$(edPlain$(b$(i)))): done = -1
+                    END IF
+                NEXT
+        END SELECT
+    LOOP
+    edUiHover = 0
+    edUiEnd
+    edConfirm% = result
+END FUNCTION
+
+SUB edMessage (title$, lines$(), n AS INTEGER)
+    'a box of text lines; any key or click closes it
+    DIM w AS LONG, h AS LONG, lft AS LONG, top AS LONG, i AS INTEGER, e AS LONG
+    IF headless THEN EXIT SUB
+    edUiStart
+    DO
+        w = 0
+        FOR i = 1 TO n
+            IF LEN(lines$(i)) > w THEN w = LEN(lines$(i))
+        NEXT
+        w = w + 6: IF w > edCols - 2 THEN w = edCols - 2
+        h = n + 4: IF h > edRows THEN h = edRows
+        lft = (edCols - w) \ 2 + 1: top = (edRows - h) \ 2 + 1
+        IF top < 1 THEN top = 1
+        edDraw
+        edBox lft, top, w, h, title$
+        edColor EC_BARTEXT, EC_BAR
+        FOR i = 1 TO n
+            IF i + 1 < h - 1 THEN edPut lft + 3, top + 1 + i, LEFT$(lines$(i), w - 6)
+        NEXT
+        _DISPLAY
+        e = edUiWait&
+        IF e > 0 OR e = -1 THEN EXIT DO
+    LOOP
+    edUiEnd
+END SUB
+
+SUB edHelp
+    DIM h$(1 TO 26)
+    h$(1) = "F10, Alt or a click         menus (Alt+letter opens one)"
+    h$(2) = "Arrows, Home, End, PgUp/Dn  move (Ctrl+arrows: by word)"
+    h$(3) = "Shift + movement, drag      select (Ctrl+A: everything)"
+    h$(4) = "Ctrl+C / Ctrl+X / Ctrl+V    copy / cut / paste"
+    h$(5) = "                            (no selection: the whole line)"
+    h$(6) = "Ctrl+Z / Ctrl+Y             undo / redo"
+    h$(7) = "Tab / Shift+Tab             indent / unindent"
+    h$(8) = "Ctrl+/                      comment / uncomment lines"
+    h$(9) = "Ctrl+D / Ctrl+K             duplicate / delete lines"
+    h$(10) = "Alt+Up / Alt+Down           move lines"
+    h$(11) = "Ctrl+F, F3, Shift+F3        find, find next / previous"
+    h$(12) = "Ctrl+H                      replace"
+    h$(13) = "Ctrl+G                      go to line"
+    h$(14) = "Insert                      insert / overwrite"
+    h$(15) = "Ctrl+N / Ctrl+O             new / open"
+    h$(16) = "Ctrl+S / Ctrl+Shift+S       save / save as"
+    h$(17) = "F5                          run the program"
+    h$(18) = "F4                          show the output screen"
+    h$(19) = "Esc                         back to the prompt"
+    h$(20) = ""
+    h$(21) = "Enter indents after FOR, DO, IF...THEN, SUB and other"
+    h$(22) = "blocks; NEXT, LOOP, END IF... line up with their block."
+    h$(23) = "Double-click selects a word; click the line numbers to"
+    h$(24) = "select lines. On macOS, Cmd works like Ctrl."
+    edMessage "Keys", h$(), 24
+END SUB
+
+SUB edAbout
+    DIM h$(1 TO 4)
+    h$(1) = "QB64 Interpreter"
+    h$(2) = ""
+    h$(3) = "Runs QB64 programs without compiling them."
+    h$(4) = "The editor's keys are under Help > Keys (F1)."
+    edMessage "About", h$(), 4
+END SUB
+
+'---------------------------------------------------------------- output screen
+SUB edShowOutput
+    'F4: shows the prompt's screen (the program's output) until a key or click
+    DIM k AS LONG, b AS _BYTE, t$
+    IF headless THEN EXIT SUB
+    t$ = _TITLE$
+    _RESIZE OFF
+    SCREEN edPrevScreen
+    _TITLE "Output screen - press any key"
+    _DISPLAY
+    _KEYCLEAR
+    edUiStart
+    DO
+        k = _KEYHIT
+        IF k > 0 AND k < 100000 THEN EXIT DO
+        DO WHILE _MOUSEINPUT
+            b = _MOUSEBUTTON(1)
+            IF b AND edUiPrevB = 0 THEN k = -1
+            edUiPrevB = b
+        LOOP
+        IF k = -1 THEN EXIT DO
+        _LIMIT 60
+    LOOP
+    SCREEN edImg
+    _TITLE t$
+    _RESIZE ON
+    IF _RESIZE THEN k = 0 'drop the event from switching screens
+    _KEYCLEAR
+    edUiEnd
+END SUB
+
+'---------------------------------------------------------------- scroll bar
+SUB edScrollGeom (trackTop AS LONG, trackH AS LONG, thumbY AS LONG, thumbH AS LONG, maxTop AS LONG)
+    'the scroll bar sits in the last column; sizes in pixels
+    DIM visible AS LONG, total AS LONG
+    visible = edRows - 2
+    total = edN
+    IF edTop + visible - 1 > total THEN total = edTop + visible - 1
+    maxTop = total - visible + 1
+    IF maxTop < 1 THEN maxTop = 1
+    trackTop = 2 * 16: trackH = (edRows - 4) * 16
+    IF trackH < 1 THEN trackH = 1
+    thumbH = trackH * visible \ total
+    IF thumbH < 12 THEN thumbH = 12
+    IF thumbH > trackH THEN thumbH = trackH
+    IF maxTop > 1 THEN thumbY = trackTop + (trackH - thumbH) * (edTop - 1) \ (maxTop - 1) ELSE thumbY = trackTop
+END SUB
+
+SUB edDrawScrollbar
+    DIM trackTop AS LONG, trackH AS LONG, thumbY AS LONG, thumbH AS LONG, maxTop AS LONG, x AS LONG
+    edScrollGeom trackTop, trackH, thumbY, thumbH, maxTop
+    x = (edCols - 1) * 8
+    LINE (x, 16)-(x + 7, (edRows - 1) * 16 - 1), edPal(EC_TRACK), BF
+    edColor EC_THUMB, EC_TRACK
+    edPut edCols, 2, CHR$(30)
+    edPut edCols, edRows - 1, CHR$(31)
+    IF edMouseDown = 3 THEN
+        LINE (x + 1, thumbY)-(x + 6, thumbY + thumbH - 1), edPal(EC_THUMBHOT), BF
+    ELSE
+        LINE (x + 1, thumbY)-(x + 6, thumbY + thumbH - 1), edPal(EC_THUMB), BF
+    END IF
+END SUB
+
+SUB edScrollClick
+    'a press in the scroll bar column
+    DIM trackTop AS LONG, trackH AS LONG, thumbY AS LONG, thumbH AS LONG, maxTop AS LONG
+    edScrollGeom trackTop, trackH, thumbY, thumbH, maxTop
+    IF edMouseY <= 2 THEN
+        edRepDir = -1
+    ELSEIF edMouseY >= edRows - 1 THEN
+        edRepDir = 1
+    ELSEIF edMousePY >= thumbY AND edMousePY < thumbY + thumbH THEN
+        edMouseDown = 3: edThumbOfs = edMousePY - thumbY 'drag the thumb
+        EXIT SUB
+    ELSEIF edMousePY < thumbY THEN
+        edRepDir = -(edRows - 3)
+    ELSE
+        edRepDir = edRows - 3
+    END IF
+    edScrollBy edRepDir
+    edMouseDown = 4: edRepT = TIMER + .4 'keeps going while held
+END SUB
+
+SUB edScrollBy (n AS LONG)
+    DIM visible AS LONG, maxTop AS LONG
+    visible = edRows - 2
+    maxTop = edN - visible + 1
+    IF maxTop < 1 THEN maxTop = 1
+    edTop = edTop + n
+    IF edTop > maxTop THEN edTop = maxTop
+    IF edTop < 1 THEN edTop = 1
+END SUB
+
+SUB edScrollDrag
+    DIM trackTop AS LONG, trackH AS LONG, thumbY AS LONG, thumbH AS LONG, maxTop AS LONG
+    edScrollGeom trackTop, trackH, thumbY, thumbH, maxTop
+    IF trackH <= thumbH THEN EXIT SUB
+    edTop = 1 + (edMousePY - edThumbOfs - trackTop) * (maxTop - 1) \ (trackH - thumbH)
+    IF edTop > maxTop THEN edTop = maxTop
+    IF edTop < 1 THEN edTop = 1
+END SUB
+
+'---------------------------------------------------------------- files
+FUNCTION edDiscardOK%% (title$)
+    'before replacing the text: offers to save changes. False to stay put.
+    DIM a AS INTEGER, f$
+    IF edModified%% = 0 THEN edDiscardOK%% = -1: EXIT FUNCTION
+    f$ = loadedFile$
+    IF f$ = "" THEN f$ = "Untitled"
+    a = edConfirm%(title$, "Save changes to " + MID$(f$, _INSTRREV(f$, "/") + 1) + "?", "Yes|No|Cancel", 0)
+    IF a = 89 THEN edSave 0: edDiscardOK%% = (edModified%% = 0)
+    IF a = 78 THEN edDiscardOK%% = -1
+END FUNCTION
+
+SUB edResetText
+    'after New or Open: fresh history and cursor
+    edUndoN = 0: edRedoN = 0: edSavedAt = 0: edLastKind = -1
+    edCY = 1: edCX = 1: edWantX = 1: edTop = 1: edLeft = 0
+    edSelOn = 0: edErrLine = 0: edTypedLine = 0: edEdited = -1
+END SUB
+
+SUB edNewFile
+    IF edDiscardOK%%("New") = 0 THEN EXIT SUB
+    edN = 1
+    REDIM edL(1 TO 1) AS STRING
+    loadedFile$ = ""
+    edResetText
+END SUB
+
+SUB edOpenFile
+    DIM f$, i AS LONG
+    IF edDiscardOK%%("Open") = 0 THEN EXIT SUB
+    f$ = _TRIM$(edInputBox$("Open", "File name:", ""))
+    IF edPromptCancel OR f$ = "" THEN EXIT SUB
+    IF _FILEEXISTS(f$) = 0 AND LCASE$(RIGHT$(f$, 4)) <> ".bas" THEN
+        IF _FILEEXISTS(f$ + ".bas") THEN f$ = f$ + ".bas"
+    END IF
+    IF _FILEEXISTS(f$) = 0 THEN edSetMsg "File not found: " + f$: EXIT SUB
+    IF load%%(f$) = 0 THEN
+        REDIM program(1) AS STRING 'an empty file
+        loadedFile$ = f$
+    END IF
+    loaded = -1
+    edN = UBOUND(program)
+    IF edN < 1 THEN edN = 1
+    REDIM edL(1 TO edN) AS STRING
+    FOR i = 1 TO UBOUND(program): edL(i) = program(i): NEXT
+    edResetText
+    edSetMsg "Loaded " + f$
+END SUB

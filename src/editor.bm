@@ -8,7 +8,7 @@
 FUNCTION edRun%
     'returns 1 when closed with Esc, 2 when F5 asks to run the program
     DIM i AS LONG, k AS LONG, redraw AS _BYTE
-    DIM prevScreen AS LONG, prevTitle$
+    DIM prevTitle$
 
     edN = UBOUND(program)
     IF edN < 1 THEN edN = 1
@@ -43,7 +43,7 @@ FUNCTION edRun%
         LOOP UNTIL edQuit
     ELSE
         prevTitle$ = _TITLE$
-        prevScreen = _COPYIMAGE(0)
+        edPrevScreen = _COPYIMAGE(0)
         edImg = _NEWIMAGE(edCols * 8, edRows * 16, 32)
         SCREEN edImg
         edSetPalette
@@ -65,16 +65,16 @@ FUNCTION edRun%
                 IF edQuit THEN EXIT DO
             LOOP
             IF edQuit = 0 THEN
-                IF edMouse%% THEN redraw = -1: edBlinkT = TIMER: IF edMouseDown = 0 THEN edLeaveLineCheck
+                IF edMouse%% THEN redraw = -1: edBlinkT = TIMER: IF edMouseDown <> 1 THEN edLeaveLineCheck
                 IF edResized%% THEN redraw = -1
                 IF edBlinkPhase%% <> edBlinkOn THEN redraw = -1
-                IF redraw THEN edDraw: redraw = 0
+                IF redraw THEN edDraw: _DISPLAY: redraw = 0
                 _LIMIT 60
             END IF
         LOOP UNTIL edQuit
         _RESIZE OFF
         _MOUSESHOW "DEFAULT"
-        SCREEN prevScreen
+        SCREEN edPrevScreen
         _FREEIMAGE edImg
         _TITLE prevTitle$
         setSoftKeys true
@@ -102,6 +102,14 @@ FUNCTION edGetKey&
     DO
         k = _KEYHIT
         IF k = 0 THEN EXIT FUNCTION
+        'Alt pressed and released on its own opens the menus
+        IF k = 100307 OR k = 100308 THEN edAltAlone = -1
+        IF (k = -100307 OR k = -100308) AND edAltAlone THEN
+            edAltAlone = 0: edShift = 0: edCtrl = 0: edAlt = 0
+            edGetKey& = EK_MENU
+            EXIT FUNCTION
+        END IF
+        IF k > 0 AND k < 100000 THEN edAltAlone = 0
     LOOP UNTIL k > 0 AND k < 100000 'skip key releases and lone modifiers
     edShift = _KEYDOWN(100303) OR _KEYDOWN(100304)
     edCtrl = _KEYDOWN(100305) OR _KEYDOWN(100306)
@@ -163,6 +171,8 @@ FUNCTION edScriptKey&
             CASE "esc": k = EK_ESC
             CASE "space": k = 32
             CASE "lbrace": k = 123
+            CASE "f10": k = EK_F10
+            CASE "menu": k = EK_MENU
             CASE "f1" TO "f9": IF LEN(nm$) = 2 THEN k = EK_F1 + (VAL(MID$(nm$, 2)) - 1) * 256
             CASE ELSE: IF LEN(nm$) = 1 THEN k = ASC(nm$)
         END SELECT
@@ -178,11 +188,15 @@ SUB edHandleKey (k AS LONG)
     DIM hadSel AS _BYTE, sy AS LONG, sx AS LONG, ey AS LONG, ex AS LONG, n AS LONG, t$
 
     edMsg$ = ""
+    IF edAlt AND NOT edCtrl AND ((k >= 65 AND k <= 90) OR (k >= 97 AND k <= 122)) THEN
+        IF edMenuForKey%(k) THEN edMenu edMenuForKey%(k) 'Alt+letter opens a menu
+        EXIT SUB
+    END IF
     IF edCtrl AND NOT edAlt THEN
         SELECT CASE k
-            CASE 97 'a
-                edSelOn = -1: edSY = 1: edSX = 1
-                edCY = edN: edCX = LEN(edL(edN)) + 1: edLastKind = -1
+            CASE 97: edSelectAll 'a
+            CASE 110: edNewFile 'n
+            CASE 111: edOpenFile 'o
             CASE 99: edCopy 0 'c
             CASE 120: edCopy -1 'x
             CASE 118: edPaste 'v
@@ -249,6 +263,8 @@ SUB edHandleKey (k AS LONG)
         CASE EK_INS: edIns = NOT edIns
         CASE EK_F1: edHelp
         CASE EK_F3: IF edFind$ = "" THEN edFindPrompt ELSE edFindNext edShift
+        CASE EK_F4: edShowOutput
+        CASE EK_F10, EK_MENU: edMenu 1
         CASE EK_F5: edQuit = 2
         CASE EK_ESC: edQuit = 1
         CASE 32 TO 126, 128 TO 255
@@ -268,6 +284,11 @@ SUB edHandleKey (k AS LONG)
     END SELECT
     edLeaveLineCheck
     edEnsureVisible
+END SUB
+
+SUB edSelectAll
+    edSelOn = -1: edSY = 1: edSX = 1
+    edCY = edN: edCX = LEN(edL(edN)) + 1: edLastKind = -1
 END SUB
 
 SUB edNewLine
@@ -896,7 +917,7 @@ SUB edFindPrompt
     DIM t$
     t$ = edSelText$
     IF t$ = "" OR INSTR(t$, CHR$(10)) > 0 THEN t$ = edFind$
-    t$ = edPrompt$("Find:", t$)
+    t$ = edInputBox$("Find", "Find what:", t$)
     IF edPromptCancel OR t$ = "" THEN EXIT SUB
     edFind$ = t$
     IF edHasSel%% THEN 'search from the start of the selection
@@ -908,12 +929,14 @@ END SUB
 
 SUB edReplacePrompt
     DIM f$, r$, a AS INTEGER, count AS LONG, all AS _BYTE, y AS LONG, x AS LONG
+    DIM lb$(1 TO 2), v$(1 TO 2)
     f$ = edSelText$
     IF f$ = "" OR INSTR(f$, CHR$(10)) > 0 THEN f$ = edFind$
-    f$ = edPrompt$("Replace:", f$)
-    IF edPromptCancel OR f$ = "" THEN EXIT SUB
-    r$ = edPrompt$("Replace '" + f$ + "' with:", edRepl$)
-    IF edPromptCancel THEN EXIT SUB
+    lb$(1) = "Find what:": lb$(2) = "Replace with:"
+    v$(1) = f$: v$(2) = edRepl$
+    IF edDialog%("Replace", 2, lb$(), v$()) = 0 THEN EXIT SUB
+    f$ = v$(1): r$ = v$(2)
+    IF f$ = "" THEN EXIT SUB
     edFind$ = f$: edRepl$ = r$
     'from the cursor (or the selection's start) to the end of the program
     y = edCY: x = edCX
@@ -929,10 +952,9 @@ SUB edReplacePrompt
         IF all THEN
             a = 65
         ELSE
-            IF NOT headless THEN edDraw
-            a = edAsk%("Replace this one? (Y)es (N)o (A)ll (Esc) stop")
+            a = edConfirm%("Replace", "Replace this occurrence?", "Yes|No|All|Cancel", edCY - edTop + 2)
         END IF
-        IF a = 27 THEN EXIT DO
+        IF a = 27 OR a = 67 THEN EXIT DO
         IF a = 65 THEN all = -1: a = 89
         IF a = 89 THEN
             edL(edFoundY) = LEFT$(edL(edFoundY), edFoundX - 1) + r$ + MID$(edL(edFoundY), edFoundX + LEN(f$))
@@ -950,7 +972,7 @@ END SUB
 
 SUB edGotoPrompt
     DIM t$, n AS LONG
-    t$ = edPrompt$("Go to line (1-" + _TRIM$(STR$(edN)) + "):", "")
+    t$ = edInputBox$("Go to Line", "Line number (1-" + _TRIM$(STR$(edN)) + "):", "")
     IF edPromptCancel OR t$ = "" THEN EXIT SUB
     n = VAL(t$)
     IF n < 1 THEN n = 1
@@ -966,12 +988,12 @@ SUB edSave (saveAs AS _BYTE)
     DIM f$, ff AS INTEGER, i AS LONG, a AS INTEGER
     f$ = loadedFile$
     IF saveAs OR f$ = "" THEN
-        f$ = edPrompt$("Save as:", f$)
+        f$ = edInputBox$("Save As", "File name:", f$)
         IF edPromptCancel OR _TRIM$(f$) = "" THEN EXIT SUB
         f$ = _TRIM$(f$)
         IF INSTR(MID$(f$, _INSTRREV(f$, "/") + 1), ".") = 0 THEN f$ = f$ + ".bas"
         IF f$ <> loadedFile$ AND _FILEEXISTS(f$) THEN
-            a = edAsk%(f$ + " exists. Overwrite? (Y/N)")
+            a = edConfirm%("Save As", f$ + " already exists. Replace it?", "Yes|No", 0)
             IF a <> 89 THEN EXIT SUB
         END IF
     END IF
@@ -992,113 +1014,46 @@ SUB edSetMsg (m$)
     IF headless THEN PRINT "editor: "; m$
 END SUB
 
-FUNCTION edPrompt$ (label$, default$)
-    'reads a line in the status bar; sets edPromptCancel on Esc
-    DIM t$, p AS LONG, k AS LONG, fresh AS _BYTE, w AS LONG, sh AS LONG, c$
-    t$ = default$: p = LEN(t$) + 1: fresh = -1
-    edPromptCancel = 0
-    DO
-        IF NOT headless THEN
-            w = edCols - LEN(label$) - 3
-            sh = 0
-            IF p > w THEN sh = p - w
-            edColor EC_BARTEXT, EC_BAR
-            edPut 1, edRows, LEFT$(" " + label$ + " " + MID$(t$, sh + 1) + SPACE$(edCols), edCols)
-            IF fresh AND LEN(t$) > 0 THEN
-                edColor EC_BRIGHT, EC_SEL
-                edPut LEN(label$) + 3, edRows, LEFT$(MID$(t$, sh + 1), w)
-            END IF
-            edBar LEN(label$) + 2 + p - sh, edRows, EC_BARTEXT
-            _DISPLAY
-        END IF
-        DO
-            k = edGetKey&
-            IF k THEN EXIT DO
-            IF edScriptEnd THEN k = EK_ESC: EXIT DO
-            _LIMIT 60
-        LOOP
-        SELECT CASE k
-            CASE EK_ENTER: EXIT DO
-            CASE EK_ESC: edPromptCancel = -1: EXIT DO
-            CASE EK_BKSP
-                IF fresh THEN t$ = "": p = 1 ELSE IF p > 1 THEN t$ = LEFT$(t$, p - 2) + MID$(t$, p): p = p - 1
-            CASE EK_DEL: IF fresh THEN t$ = "": p = 1 ELSE t$ = LEFT$(t$, p - 1) + MID$(t$, p + 1)
-            CASE EK_LEFT: IF p > 1 THEN p = p - 1
-            CASE EK_RIGHT: IF p <= LEN(t$) THEN p = p + 1
-            CASE EK_HOME: p = 1
-            CASE EK_END: p = LEN(t$) + 1
-            CASE ELSE
-                c$ = ""
-                IF edCtrl AND k = 118 THEN
-                    c$ = edGetClip$
-                    IF INSTR(c$, CHR$(10)) THEN c$ = LEFT$(c$, INSTR(c$, CHR$(10)) - 1)
-                    IF INSTR(c$, CHR$(13)) THEN c$ = LEFT$(c$, INSTR(c$, CHR$(13)) - 1)
-                ELSEIF edCtrl = 0 AND ((k >= 32 AND k <= 126) OR (k >= 128 AND k <= 255)) THEN
-                    c$ = CHR$(k)
-                END IF
-                IF LEN(c$) THEN
-                    IF fresh THEN t$ = "": p = 1
-                    t$ = LEFT$(t$, p - 1) + c$ + MID$(t$, p): p = p + LEN(c$)
-                END IF
-        END SELECT
-        fresh = 0
-    LOOP
-    edPrompt$ = t$
-END FUNCTION
-
-FUNCTION edAsk% (q$)
-    'shows q$ and returns the key pressed (letters in upper case)
-    DIM k AS LONG
-    IF NOT headless THEN
-        edColor EC_BARTEXT, EC_BAR
-        edPut 1, edRows, LEFT$(" " + q$ + SPACE$(edCols), edCols)
-        edBar LEN(q$) + 3, edRows, EC_BARTEXT
-        _DISPLAY
-    END IF
-    DO
-        k = edGetKey&
-        IF edScriptEnd THEN k = EK_ESC
-        IF k THEN EXIT DO
-        _LIMIT 60
-    LOOP
-    IF k >= 97 AND k <= 122 THEN k = k - 32
-    edAsk% = k
-END FUNCTION
-
 '---------------------------------------------------------------- mouse
 FUNCTION edMouse%%
-    DIM wheel AS LONG, b AS _BYTE, changed AS _BYTE, y AS LONG, x AS LONG, rows AS LONG
+    DIM wheel AS LONG, b AS _BYTE, changed AS _BYTE, rows AS LONG
     rows = edRows - 2
     DO WHILE _MOUSEINPUT
         wheel = wheel + _MOUSEWHEEL
         b = _MOUSEBUTTON(1)
-        edMouseY = _MOUSEY \ 16 + 1: edMouseX = _MOUSEX \ 8 + 1
-        IF b AND edMouseDown = 0 THEN
-            IF edMouseY >= 2 AND edMouseY <= edRows - 1 THEN
-                edMouseClick
-                edMouseDown = -1
-                changed = -1
-            END IF
-        ELSEIF b AND edMouseDown THEN
-            edMouseDrag
-            changed = -1
-        ELSEIF b = 0 THEN
+        edMouseY = _MOUSEY \ 16 + 1: edMouseX = _MOUSEX \ 8 + 1: edMousePY = _MOUSEY
+        IF b = 0 THEN
+            IF edMouseDown THEN changed = -1
             edMouseDown = 0
+        ELSEIF edMouseDown = 0 THEN 'a press
+            IF edMouseY = 1 THEN
+                IF edMenuAt%(edMouseX) THEN edMenu edMenuAt%(edMouseX): edMouse%% = -1: EXIT FUNCTION
+                edMouseDown = 2
+            ELSEIF edMouseY <= edRows - 1 AND edMouseX >= edCols THEN
+                edScrollClick
+            ELSEIF edMouseY <= edRows - 1 THEN
+                edMouseClick
+                edMouseDown = 1
+            ELSE
+                edMouseDown = 2
+            END IF
+            changed = -1
+        ELSEIF edMouseDown = 1 THEN
+            edMouseDrag: changed = -1
+        ELSEIF edMouseDown = 3 THEN
+            edScrollDrag: changed = -1
         END IF
     LOOP
-    'keep scrolling while dragging above or below the text
-    IF edMouseDown THEN
+    'keep scrolling while dragging above or below the text, or holding
+    'the scroll bar's arrows or track
+    IF edMouseDown = 1 THEN
         IF edMouseY < 2 AND edTop > 1 THEN edTop = edTop - 1: edMouseDrag: changed = -1
         IF edMouseY > edRows - 1 AND edTop + rows - 1 < edN THEN edTop = edTop + 1: edMouseDrag: changed = -1
     END IF
-    IF wheel THEN
-        edTop = edTop + wheel * 3
-        IF edTop > edN - rows + 1 THEN edTop = edN - rows + 1
-        IF edTop < 1 THEN edTop = 1
-        changed = -1
-    END IF
+    IF edMouseDown = 4 AND TIMER >= edRepT THEN edScrollBy edRepDir: edRepT = TIMER + .05: changed = -1
+    IF wheel THEN edScrollBy wheel * 3: changed = -1
     'I-beam over the text, arrow elsewhere
-    IF edMouseY >= 2 AND edMouseY <= edRows - 1 AND edMouseX > edGW THEN
+    IF edMouseY >= 2 AND edMouseY <= edRows - 1 AND edMouseX > edGW AND edMouseX < edCols THEN
         IF edPointer <> 1 THEN _MOUSESHOW "TEXT": edPointer = 1
     ELSE
         IF edPointer <> 2 THEN _MOUSESHOW "DEFAULT": edPointer = 2
@@ -1114,6 +1069,7 @@ SUB edMouseToText (y AS LONG, x AS LONG)
     y = edTop + my - 2
     IF y > edN THEN y = edN
     x = edLeft + edMouseX - edGW
+    IF edMouseX >= edCols THEN x = edLeft + edCols - 1 - edGW
     IF x < 1 THEN x = 1
     IF x > LEN(edL(y)) + 1 THEN x = LEN(edL(y)) + 1
 END SUB
@@ -1225,6 +1181,11 @@ SUB edSetPalette
     edPal(EC_META) = _RGB32(90, 210, 90)
     edPal(EC_LABEL) = _RGB32(240, 220, 120)
     edPal(EC_BRIGHT) = _RGB32(255, 255, 255)
+    edPal(EC_HOTKEY) = _RGB32(150, 0, 0)
+    edPal(EC_TRACK) = _RGB32(20, 28, 70)
+    edPal(EC_THUMB) = _RGB32(120, 135, 185)
+    edPal(EC_THUMBHOT) = _RGB32(190, 200, 235)
+    edPal(EC_BUTTON) = _RGB32(90, 100, 135)
 END SUB
 
 SUB edColor (fg AS INTEGER, bg AS INTEGER)
@@ -1274,7 +1235,7 @@ END SUB
 SUB edEnsureVisible
     DIM rows AS LONG, tw AS LONG
     edCalcGutter
-    rows = edRows - 2: tw = edCols - edGW
+    rows = edRows - 2: tw = edCols - edGW - 1
     IF edCY < edTop THEN edTop = edCY
     IF edCY > edTop + rows - 1 THEN edTop = edCY - rows + 1
     IF edTop > edN THEN edTop = edN
@@ -1358,21 +1319,17 @@ SUB edDraw
     DIM run$, runX AS LONG, i AS LONG, needle$, sel AS _BYTE
 
     edCalcGutter
-    tw = edCols - edGW
+    tw = edCols - edGW - 1
     hasSel = edGetSel%(sy, sx, ey, ex)
     needle$ = UCASE$(edFind$)
 
-    'title bar
+    'menu bar
     f$ = loadedFile$
     IF f$ = "" THEN f$ = "Untitled"
     f$ = MID$(f$, _INSTRREV(f$, "/") + 1)
     IF edModified%% THEN f$ = f$ + " *"
     _TITLE "Editing " + f$
-    edColor EC_BARTEXT, EC_BAR
-    edPut 1, 1, SPACE$(edCols)
-    edPut (edCols - LEN(f$)) \ 2 + 1, 1, f$
-    edPut 2, 1, "QB64 Interpreter"
-    edPut edCols - 8, 1, "F1 Help"
+    edDrawMenuBar 0
 
     FOR r = 2 TO edRows - 1
         y = edTop + r - 2
@@ -1427,6 +1384,7 @@ SUB edDraw
         edColor runFg, runBg: edPut runX, r, run$
         IF edLeft > 0 THEN edColor EC_GUTTER, EC_BG: edPut edGW, r, CHR$(17)
     NEXT
+    edDrawScrollbar
 
     'status bar
     rt$ = "Ln " + _TRIM$(STR$(edCY)) + "/" + _TRIM$(STR$(edN)) + "  Col " + _TRIM$(STR$(edCX)) + "  "
@@ -1437,7 +1395,7 @@ SUB edDraw
     ELSE
         'as many key hints as fit
         t$ = ""
-        f$ = "^S Save|F5 Run|^F Find|Esc Close|^H Replace|^G Go to|^Z Undo|"
+        f$ = "F10 Menu|^S Save|F5 Run|F4 Output|^F Find|Esc Close|^Z Undo|"
         DO WHILE LEN(f$)
             i = INSTR(f$, "|")
             IF LEN(t$) + i + 2 > edCols - LEN(rt$) THEN EXIT DO
@@ -1455,57 +1413,12 @@ SUB edDraw
     'cursor: a blinking bar (a block when overwriting)
     edBlinkOn = edBlinkPhase%%
     y = edCY - edTop + 2: x = edCX - edLeft + edGW
-    IF edBlinkOn AND y >= 2 AND y <= edRows - 1 AND x > edGW AND x <= edCols THEN
+    IF edBlinkOn AND edModal = 0 AND y >= 2 AND y <= edRows - 1 AND x > edGW AND x < edCols THEN
         IF edIns THEN
             edBar x, y, EC_BRIGHT
         ELSE
             LINE ((x - 1) * 8, (y - 1) * 16)-(x * 8 - 1, y * 16 - 1), _RGBA32(255, 255, 255, 110), BF
         END IF
     END IF
-    _DISPLAY
-END SUB
-
-SUB edHelp
-    DIM h$(1 TO 24), i AS LONG, w AS LONG, top AS LONG, lft AS LONG, k AS LONG
-    IF headless THEN EXIT SUB
-    h$(1) = "Editor keys"
-    h$(2) = ""
-    h$(3) = "Arrows, Home, End, PgUp, PgDn    move (Ctrl+arrows: by word)"
-    h$(4) = "Shift + movement, mouse drag     select (Ctrl+A: everything)"
-    h$(5) = "Ctrl+C / Ctrl+X / Ctrl+V         copy / cut / paste"
-    h$(6) = "                                 (no selection: the whole line)"
-    h$(7) = "Ctrl+Z / Ctrl+Y                  undo / redo"
-    h$(8) = "Tab / Shift+Tab                  indent / unindent"
-    h$(9) = "Ctrl+/                           comment / uncomment lines"
-    h$(10) = "Ctrl+D                           duplicate lines"
-    h$(11) = "Ctrl+K                           delete lines"
-    h$(12) = "Alt+Up / Alt+Down                move lines"
-    h$(13) = "Ctrl+F, F3, Shift+F3             find, find next / previous"
-    h$(14) = "Ctrl+H                           replace"
-    h$(15) = "Ctrl+G                           go to line"
-    h$(16) = "Insert                           insert / overwrite"
-    h$(17) = "Ctrl+S / Ctrl+Shift+S            save / save as"
-    h$(18) = "F5                               run the program"
-    h$(19) = "Esc                              back to the prompt"
-    h$(20) = ""
-    h$(21) = "Double-click selects a word; click the line numbers to"
-    h$(22) = "select whole lines. On macOS, Cmd works like Ctrl."
-    h$(23) = ""
-    h$(24) = "Press any key"
-    w = 68: top = (edRows - 26) \ 2 + 1: lft = (edCols - w) \ 2 + 1
-    IF top < 1 THEN top = 1
-    IF lft < 1 THEN lft = 1
-    edColor EC_BARTEXT, EC_BAR
-    edPut lft, top, CHR$(218) + STRING$(w - 2, 196) + CHR$(191)
-    FOR i = 1 TO 24
-        edPut lft, top + i, CHR$(179) + " " + LEFT$(h$(i) + SPACE$(w), w - 4) + " " + CHR$(179)
-    NEXT
-    edPut lft, top + 25, CHR$(192) + STRING$(w - 2, 196) + CHR$(217)
-    _DISPLAY
-    DO
-        k = edGetKey&
-        IF k THEN EXIT DO
-        IF _MOUSEINPUT THEN IF _MOUSEBUTTON(1) THEN edMouseDown = -1: EXIT DO
-        _LIMIT 60
-    LOOP
+    'the caller shows it with _DISPLAY, after drawing anything on top
 END SUB

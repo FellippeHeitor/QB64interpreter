@@ -1,0 +1,62 @@
+.NEW
+.LIST
+ 1 a = 1
+ 2 b = 2 + 10
+ 3 c = 3
+ 4 PRINT a + b + c
+End of file - 
+.EDIT
+ 16 
+.EDIT
+.LIST
+ 1 a = 1
+ 2 b = 2 + 10
+ 3 c = 3
+ 4 PRINT a + b + c
+End of file - 
+.EDIT
+.LIST
+ 1 a = 1
+ 2 b = 2 + 10
+ 3 c = 3
+ 4 PRINT a + b + c
+ 5 a = 1
+ 6 b = 2 + 10
+ 7 c = 3
+ 8 PRINT a + b + c
+End of file - 
+.EDIT
+editor: 1 replaced
+.LIST
+ 1 a = 1
+ 2 b == 2 + 10
+ 3 c = 3
+ 4 PRINT a + b + c
+ 5 a = 1
+ 6 b = 2 + 10
+ 7 c = 3
+ 8 PRINT a + b + c
+End of file - 
+.EDIT
+.LIST
+ 1 
+End of file - 
+.EDIT
+editor: Saved tests/_ui_tmp.bas
+editor: Loaded tests/gosub.bas
+.LIST 1
+x = 1
+.EDIT
+editor: File not found: tests/nosuchfile
+.EDIT
+editor: Saved tests/_ui_tmp.bas
+.KILL "tests/_ui_tmp.bas"
+.EDIT
+.LIST 1
+x = 1
+.EDIT
+editor: Not found: abcdX
+editor: Not found: hello 
+editor: Not found: abcabc
+editor: Not found: Zc
+editor: Not found: Z

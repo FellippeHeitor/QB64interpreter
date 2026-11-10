@@ -624,4 +624,5 @@ END FUNCTION
 '$include:'exec.bm'
 '$include:'stmts.bm'
 '$include:'editor.bm'
+'$include:'editorui.bm'
 '$include:'lineedit.bm'
