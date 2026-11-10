@@ -1,0 +1,23 @@
+PRINT 1 / 3
+a = 1 / 3
+PRINT a
+b# = 1 / 3
+PRINT b#
+c! = 0.1
+PRINT c!
+PRINT 1.5 / 7
+PRINT 2 ^ 0.5
+PRINT 10 / 4
+d& = 100000
+PRINT d& * 3
+e%% = 200
+PRINT e%%
+f~%% = -1
+PRINT f~%%
+PRINT &HFF; &O17
+PRINT 1E+20
+PRINT -0.5
+PRINT 3 MOD -2; -7 \ 2
+PRINT 5 AND 3; 5 OR 3; 5 XOR 3; NOT 0
+g% = 40000
+PRINT g%

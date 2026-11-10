@@ -6,11 +6,24 @@ CONST true = -1, false = NOT true
 
 DIM SHARED debugging AS _BYTE
 debugging = false
-'ON ERROR GOTO oops
 
 '$include:'qXed/qXed.bi'
 
-IF debugging = false THEN
+'Headless mode: "basiccmdline -run file.bas" runs the program with output
+'sent to the console (stdout) and exits when it ends. Used by tests/.
+DIM SHARED headless AS _BYTE, autoRun AS _BYTE, startFile$
+startFile$ = COMMAND$
+IF LCASE$(LEFT$(startFile$, 5)) = "-run " THEN
+    headless = true
+    startFile$ = _TRIM$(MID$(startFile$, 6))
+    IF LEFT$(startFile$, 1) = CHR$(34) THEN startFile$ = removeQuote$(startFile$)
+    _SCREENHIDE
+    _DEST _CONSOLE
+END IF
+
+IF headless THEN
+    'keep the console
+ELSEIF debugging = false THEN
     _CONSOLE OFF
 ELSE
     _SCREENMOVE _SCREENX + 800, _SCREENY
@@ -23,10 +36,12 @@ KEY 5, "RUN" + CHR$(13)
 KEY ON
 
 TYPE vartype
-    name AS STRING * 40
+    name AS STRING 'as typed by the user
+    key AS STRING 'lowercase name used for lookups
     type AS _BYTE
-    scope AS STRING * 50
+    scope AS STRING
     protected AS _BYTE
+    nextHash AS LONG
 END TYPE
 
 TYPE levelControlType
@@ -36,6 +51,7 @@ TYPE levelControlType
     condition AS _BYTE
     'For DO/LOOP blocks:
     '    0 = no condition; 1 = DO + condition; 2 = LOOP + condition
+    stmtPos AS LONG 'where the DO statement starts in its line (1 = line start)
 END TYPE
 
 TYPE forControlType
@@ -61,6 +77,8 @@ CONST varType_INTEGER64 = 9
 CONST varType_ULONG = 10
 CONST varTypeLONG = 11
 
+'$include:'eval.bi'
+
 
 REDIM SHARED vars(0) AS vartype
 REDIM SHARED strings(0) AS STRING
@@ -70,13 +88,14 @@ DIM SHARED totalVars AS LONG, varType_DEFAULT AS _BYTE
 DIM SHARED thisScope$, currentLine AS LONG, lineThatErrored AS LONG
 DIM varIndex AS LONG, i AS LONG, j AS LONG, l AS LONG
 DIM continuation$, Ucontinuation$, continueAt AS LONG
+DIM stmtPos AS LONG 'where the current statement starts in program(currentLine)
 DIM loopControl(100) AS levelControlType
 DIM forControl(100) AS forControlType
 DIM currentDoLevel AS INTEGER, currentIfLevel AS INTEGER, currentForLevel AS INTEGER
-DIM SHARED errorHappened AS _BYTE
+DIM SHARED errorHappened AS _BYTE, lastErrorCode AS INTEGER, runtimeErr AS INTEGER
 DIM SHARED keyhit AS LONG, screenKeyStatus AS _BYTE
 DIM externalLimit AS INTEGER
-DIM temp$, L$, L1$, saveFile$, q AS STRING * 1, k$
+DIM temp$, L$, L1$, saveFile$, q AS STRING * 1, k$, varName$
 DIM MyBad AS _BYTE, Comma1 AS INTEGER, Comma2 AS INTEGER, Comma3 AS INTEGER
 DIM SHARED running AS _BYTE, loaded AS _BYTE, loadedFile$
 DIM SHARED loadedFileContents$
@@ -85,20 +104,23 @@ thisScope$ = "MAIN MODULE"
 varType_DEFAULT = varTypeSINGLE
 screenKeyStatus = true
 
-IF _FILEEXISTS(COMMAND$) THEN
-    loaded = load(COMMAND$)
-    IF loaded THEN PRINT "Loaded - "; COMMAND$
-ELSEIF LEN(COMMAND$) > 0 THEN
-    IF LCASE$(RIGHT$(COMMAND$, 4)) <> ".bas" THEN
-        IF _FILEEXISTS(COMMAND$ + ".bas") THEN
-            loaded = load(COMMAND$ + ".bas")
-            IF loaded THEN PRINT "Loaded - "; COMMAND$ + ".bas"
+IF _FILEEXISTS(startFile$) THEN
+    loaded = load(startFile$)
+    IF loaded AND NOT headless THEN PRINT "Loaded - "; startFile$
+ELSEIF LEN(startFile$) > 0 THEN
+    IF LCASE$(RIGHT$(startFile$, 4)) <> ".bas" THEN
+        IF _FILEEXISTS(startFile$ + ".bas") THEN
+            loaded = load(startFile$ + ".bas")
+            IF loaded AND NOT headless THEN PRINT "Loaded - "; startFile$ + ".bas"
         ELSE
-            PRINT "File not found - "; COMMAND$ + ".bas"
+            PRINT "File not found - "; startFile$ + ".bas"
         END IF
     ELSE
-        PRINT "File not found - "; COMMAND$
+        PRINT "File not found - "; startFile$
     END IF
+END IF
+IF headless THEN
+    IF loaded THEN autoRun = true ELSE SYSTEM 1
 END IF
 
 'internal variables (functions)
@@ -146,8 +168,12 @@ DATA _strcmp,_autodisplay,_shr,_shl,_deflate$,_inflate$
 DATA _readbit,_setbit,_resetbit,_togglebit
 DATA *end*
 
+ON ERROR GOTO runtimeError
+
 DO
     keyhit = _KEYHIT
+    errorHappened = false
+    stmtPos = 1
 
     IF (ABS(keyhit) = ASC("C") OR ABS(keyhit) = ASC("c")) AND (_KEYDOWN(100305) OR _KEYDOWN(100306)) THEN
         PRINT "Break."
@@ -164,7 +190,17 @@ DO
         END IF
     END IF
 
-    IF NOT running THEN _AUTODISPLAY: LINE INPUT "."; L1$
+    IF NOT running THEN
+        IF autoRun THEN
+            autoRun = false
+            L1$ = "RUN"
+        ELSEIF headless THEN
+            SYSTEM
+        ELSE
+            _AUTODISPLAY
+            LINE INPUT "."; L1$
+        END IF
+    END IF
 
     L1$ = LTRIM$(RTRIM$(L1$))
     L$ = UCASE$(L1$)
@@ -190,8 +226,8 @@ DO
             GOTO redoThisLine
         END IF
     ELSE
-        'look for : separators
-        IF LEFT$(L$, 3) <> "IF " THEN
+        'look for : separators (not in comments or single-line IFs)
+        IF LEFT$(L$, 3) <> "IF " AND LEFT$(L$, 1) <> "'" AND LEFT$(L$, 4) <> "REM " THEN
             j = Find(1, L$, ":")
             IF j > 0 AND j < LEN(L$) THEN
                 continuation$ = _TRIM$(MID$(L1$, j + 1))
@@ -222,7 +258,7 @@ DO
 
         IF LEFT$(L$, 5) = "LOAD " THEN
             IF NOT running THEN
-                temp$ = Parse$(MID$(L1$, 6))
+                temp$ = fileArg$(MID$(L1$, 6))
                 tryWithExtension:
                 IF _FILEEXISTS(temp$) THEN
                     loaded = load(temp$)
@@ -265,11 +301,11 @@ DO
             '        END IF
             '    END IF
         ELSEIF LEFT$(L$, 6) = "CHDIR " THEN
-            CHDIR Parse$(MID$(L1$, 7))
+            CHDIR fileArg$(MID$(L1$, 7))
         ELSEIF LEFT$(L$, 6) = "MKDIR " THEN
-            MKDIR Parse$(MID$(L1$, 7))
+            MKDIR fileArg$(MID$(L1$, 7))
         ELSEIF LEFT$(L$, 5) = "KILL " THEN
-            KILL Parse$(MID$(L1$, 6))
+            KILL fileArg$(MID$(L1$, 6))
         ELSEIF L$ = "DEBUG ON" THEN
             _CONSOLE ON
             debugging = true
@@ -333,7 +369,7 @@ DO
             END IF
         ELSEIF LEFT$(L$, 5) = "SAVE " THEN
             IF NOT running THEN
-                saveFile$ = Parse$(MID$(L$, 6))
+                saveFile$ = fileArg$(MID$(L1$, 6))
                 'db_echo "About to save '" + saveFile$ + "'"
                 IF loaded THEN
                     IF saveFile$ <> loadedFile$ THEN
@@ -362,19 +398,10 @@ DO
                 END IF
             END IF
         ELSEIF L$ = "CLEAR" THEN
-            j = 0
-            FOR i = totalVars TO 1 STEP -1
-                IF NOT vars(i).protected THEN
-                    totalVars = totalVars - 1
-                    vars(i).name = ""
-                    vars(i).type = 0
-                    strings(i) = ""
-                    nums(i) = 0
-                END IF
-            NEXT
+            clearVars
         ELSEIF L$ = "NEW" OR LEFT$(L$, 4) = "NEW " THEN
             IF NOT running THEN
-                IF LEN(L$) > 3 THEN loadedFile$ = MID$(L$, 5) ELSE loadedFile$ = ""
+                IF LEN(L$) > 3 THEN loadedFile$ = fileArg$(MID$(L1$, 5)) ELSE loadedFile$ = ""
                 loaded = true
                 REDIM SHARED program(1) AS STRING
                 loadedFileContents$ = CHR$(10)
@@ -486,7 +513,7 @@ DO
                         IF vars(i).type = varTypeSTRING THEN
                             PRINT CHR$(34); strings(i); CHR$(34)
                         ELSE
-                            PRINT nums(i)
+                            PRINT numStr$(nums(i), vars(i).type)
                         END IF
 
                         IF j MOD 20 = 0 AND i < totalVars THEN
@@ -574,23 +601,27 @@ DO
                 END IF
             END IF
         ELSEIF LEFT$(L$, 6) = "WIDTH " THEN
-            DIM p$, p1$, p2$
-            p$ = MID$(L$, 7)
-            IF INSTR(p$, ",") THEN
-                p1$ = LEFT$(p$, INSTR(p$, ",") - 1)
-                p2$ = MID$(p$, INSTR(p$, ",") + 1)
-                IF LEN(p1$) = 0 THEN
-                    WIDTH , VAL(Parse$(p2$))
-                ELSE
-                    WIDTH VAL(Parse$(p1$)), VAL(Parse$(p2$))
-                END IF
-            ELSE
-                WIDTH VAL(Parse$(p$))
-            END IF
+            REDIM arg$(0)
+            SELECT CASE splitArgs(MID$(L1$, 7), arg$())
+                CASE 1
+                    WIDTH evalNum(arg$(1))
+                CASE 2
+                    IF LEN(arg$(1)) = 0 THEN
+                        WIDTH , evalNum(arg$(2))
+                    ELSEIF LEN(arg$(2)) = 0 THEN
+                        WIDTH evalNum(arg$(1))
+                    ELSE
+                        WIDTH evalNum(arg$(1)), evalNum(arg$(2))
+                    END IF
+                CASE ELSE
+                    GOTO syntaxerror
+            END SELECT
+        ELSEIF L$ = "RANDOMIZE" THEN
+            RANDOMIZE TIMER
         ELSEIF LEFT$(L$, 10) = "RANDOMIZE " THEN
-            RANDOMIZE VAL(Parse$(MID$(L$, 11)))
+            RANDOMIZE evalNum(MID$(L1$, 11))
         ELSEIF LEFT$(L$, 7) = "_LIMIT " THEN
-            externalLimit = VAL(Parse$(MID$(L$, 8)))
+            externalLimit = evalNum(MID$(L1$, 8))
         ELSEIF LEFT$(L$, 1) = "'" OR LEFT$(L$, 4) = "REM " OR L$ = "'" OR L$ = "REM" OR L$ = "" THEN
             'it's a comment.
         ELSEIF LEFT$(L$, 4) = "KEY " THEN
@@ -606,10 +637,29 @@ DO
         ELSEIF L$ = "RUN" THEN
             IF NOT running THEN
                 IF loaded THEN
+                    'start clean: no variables, no open blocks from a previous run
+                    clearVars
+                    FOR i = 0 TO UBOUND(loopControl)
+                        loopControl(i).firstLine = 0
+                        loopControl(i).lastLine = 0
+                        loopControl(i).continueAt = 0
+                        loopControl(i).condition = 0
+                        loopControl(i).stmtPos = 0
+                    NEXT
+                    FOR i = 0 TO UBOUND(forControl)
+                        forControl(i).level.firstLine = 0
+                        forControl(i).level.lastLine = 0
+                        forControl(i).level.continueAt = 0
+                        forControl(i).varIndex = 0
+                        forControl(i).varName = ""
+                    NEXT
                     currentLine = 0
                     currentDoLevel = 0
                     currentIfLevel = 0
+                    currentForLevel = 0
                     externalLimit = 0
+                    lineThatErrored = 0
+                    lastErrorCode = 0
                     running = true
                     _KEYCLEAR
                 ELSE
@@ -617,21 +667,21 @@ DO
                 END IF
             END IF
         ELSEIF LEFT$(L$, 6) = "COLOR " THEN
-            DIM c$, c1$, c2$
-            c$ = MID$(L$, 7)
-            IF INSTR(c$, ",") THEN
-                c1$ = LEFT$(c$, INSTR(c$, ",") - 1)
-                c2$ = MID$(c$, INSTR(c$, ",") + 1)
-                IF LEN(c1$) > 0 AND LEN(c2$) > 0 THEN
-                    COLOR VAL(Parse(c1$)), VAL(Parse(c2$))
-                ELSEIF LEN(c1$) > 0 AND LEN(c2$) = 0 THEN
-                    COLOR VAL(Parse(c1$))
-                ELSEIF LEN(c1$) = 0 AND LEN(c2$) > 0 THEN
-                    COLOR , VAL(Parse(c2$))
-                END IF
-            ELSE
-                COLOR VAL(Parse(c$))
-            END IF
+            REDIM arg$(0)
+            SELECT CASE splitArgs(MID$(L1$, 7), arg$())
+                CASE 1
+                    COLOR evalNum(arg$(1))
+                CASE 2
+                    IF LEN(arg$(1)) = 0 THEN
+                        COLOR , evalNum(arg$(2))
+                    ELSEIF LEN(arg$(2)) = 0 THEN
+                        COLOR evalNum(arg$(1))
+                    ELSE
+                        COLOR evalNum(arg$(1)), evalNum(arg$(2))
+                    END IF
+                CASE ELSE
+                    GOTO syntaxerror
+            END SELECT
         ELSEIF LEFT$(L$, 7) = "_BLINK " THEN
             IF _TRIM$(MID$(L$, 8)) = "ON" THEN
                 _BLINK ON
@@ -641,102 +691,50 @@ DO
                 GOTO syntaxerror
             END IF
         ELSEIF LEFT$(L$, 7) = "LOCATE " THEN
-            c$ = MID$(L$, 8)
-            IF INSTR(c$, ",") THEN
-                c1$ = LEFT$(c$, INSTR(c$, ",") - 1)
-                c2$ = MID$(c$, INSTR(c$, ",") + 1)
-                IF LEN(c1$) > 0 AND LEN(c2$) > 0 THEN
-                    LOCATE VAL(Parse$(c1$)), VAL(Parse$(c2$))
-                ELSEIF LEN(c1$) > 0 AND LEN(c2$) = 0 THEN
-                    LOCATE VAL(Parse$(c1$))
-                ELSEIF LEN(c1$) = 0 AND LEN(c2$) > 0 THEN
-                    LOCATE , VAL(Parse$(c2$))
-                END IF
-            ELSE
-                LOCATE VAL(Parse$(c$))
+            DIM row AS LONG, col AS LONG
+            REDIM arg$(0)
+            l = splitArgs(MID$(L1$, 8), arg$())
+            IF l > 3 THEN GOTO syntaxerror
+            row = CSRLIN: col = POS(0)
+            IF l >= 1 THEN IF LEN(arg$(1)) THEN row = evalNum(arg$(1))
+            IF l >= 2 THEN IF LEN(arg$(2)) THEN col = evalNum(arg$(2))
+            IF errorHappened = 0 THEN
+                LOCATE row, col
+                IF l >= 3 THEN IF LEN(arg$(3)) THEN LOCATE , , evalNum(arg$(3))
             END IF
         ELSEIF LEFT$(L$, 6) = "FILES " THEN
-            temp$ = Parse$(MID$(L1$, 7))
-            FILES temp$
+            FILES fileArg$(MID$(L1$, 7))
         ELSEIF L$ = "FILES" THEN
             FILES
         ELSEIF LEFT$(L$, 9) = "_SNDPLAY " THEN
-            _SNDPLAY VAL(Parse$(MID$(L$, 10)))
-        ELSEIF LEFT$(L$, 5) = "BEEP" THEN
+            _SNDPLAY evalNum(MID$(L1$, 10))
+        ELSEIF L$ = "BEEP" THEN
             BEEP
         ELSEIF LEFT$(L$, 6) = "SOUND " THEN
-            c$ = MID$(L$, 7)
-            c1$ = LEFT$(c$, INSTR(c$, ",") - 1)
-            c2$ = MID$(c$, INSTR(c$, ",") + 1)
-            IF (VAL(c1$) = 0 OR (VAL(c1$) >= 32 AND VAL(c1$) <= 32767)) THEN 
-                SOUND VAL(c1$), VAL(c2$)
-            ELSE
-                PRINT "Illegal frequency. Valid = 0 (delay), and 32 to 32767"
-                GOTO Parse.Done
-            END IF
-        ELSEIF LEFT$(L$, 8) = "CIRCLE (" THEN
-            IF _PIXELSIZE(_DEST) = 0 THEN throwError 5: GOTO Parse.Done
-            Comma1% = INSTR(L$, ","): Comma2% = INSTR(Comma1% + 1, L$, ","): Comma3% = INSTR(Comma2% + 1, L$, ",")
-
-            DIM XPos1%, YPos1%, X1%, Y1%, Rad%, DrawClr%, EPos%, Elipse!, Arc%
-            DIM Comma4%, Comma5%, ArcBeg!, ArcEnd!, d##
-            XPos1% = INSTR(L$, " (") + 2
-            YPos1% = Comma1% + 1
-            X1% = VAL(Parse(MID$(L$, XPos1%, Comma1% - XPos1%)))
-            Y1% = VAL(Parse(MID$(L$, YPos1%, Comma2% - YPos1% - 1)))
-
-            Rad% = VAL(Parse(MID$(L$, Comma2% + 1, Comma3% - Comma2% - 1)))
-
-            c$ = LTRIM$(RTRIM$(LEFT$(MID$(L$, Comma3% + 1), 3))) 'Color attribute (variable or constant)
-            IF RIGHT$(c$, 1) = "," THEN c$ = LEFT$(c$, LEN(c$) - 1) 'If single-digit attribute
-
-            IF INSTR("0123456789", LEFT$(c$, 1)) > 0 THEN DrawClr% = VAL(c$) ELSE DrawClr% = VAL(Parse(c$))
-
-            EPos% = INSTR(L$, ", , , ")
-
-            IF EPos% > 0 THEN
-                EPos% = EPos% + 6: Elipse = VAL(Parse$(MID$(L$, EPos%)))
-            ELSE
-                Arc% = INSTR(Comma3% + 1, L$, ",")
-
-                IF Arc% > 0 THEN
-                    Comma4% = Arc%
-                    Comma5% = INSTR(Comma4% + 1, L$, ",")
-
-                    ArcBeg = VAL(Parse$(MID$(L$, Comma4% + 1, Comma5% - Comma4% - 1))) ': PRINT "ArcBeg:"; ArcBeg;   '* * * * Test PRINT
-                    ArcEnd = VAL(Parse$(MID$(L$, Comma5% + 1))) ': PRINT " ArcEnd:"; ArcEnd;
-
-                    IF INSTR(Comma5% + 1, L$, ",") > 0 THEN EPos% = INSTR(Comma5% + 1, L$, ",") + 1: Elipse = VAL(Parse$(MID$(L$, EPos%)))
+            DIM freq AS SINGLE, dur AS SINGLE
+            REDIM arg$(0)
+            IF splitArgs(MID$(L1$, 7), arg$()) <> 2 THEN GOTO syntaxerror
+            freq = evalNum(arg$(1))
+            dur = evalNum(arg$(2))
+            IF errorHappened = 0 THEN
+                IF freq = 0 OR (freq >= 37 AND freq <= 32767) THEN
+                    SOUND freq, dur
+                ELSE
+                    throwError 5
                 END IF
             END IF
-
-            IF Arc% > 0 AND Elipse = 0 THEN CIRCLE (X1%, Y1%), Rad%, DrawClr%, ArcBeg, ArcEnd: GOTO Circ.Done
-            IF Elipse > 0 AND Arc% = 0 THEN CIRCLE (X1%, Y1%), Rad%, DrawClr%, , , Elipse: GOTO Circ.Done
-            IF Arc% > 0 AND Elipse > 0 THEN CIRCLE (X1%, Y1%), Rad%, DrawClr%, ArcBeg, ArcEnd, Elipse: GOTO Circ.Done
-            CIRCLE (X1%, Y1%), Rad%, DrawClr% 'No arc, no elipse
-
-            Circ.Done: Rad% = 0: Arc% = 0: Elipse = 0: c$ = "": DrawClr% = 0: GOTO Parse.Done
+        ELSEIF LEFT$(L$, 7) = "CIRCLE " OR LEFT$(L$, 7) = "CIRCLE(" THEN
+            doCircle MID$(L1$, 7)
         ELSEIF L$ = "SLEEP" THEN
             SLEEP
         ELSEIF LEFT$(L$, 6) = "SLEEP " THEN
-            SLEEP VAL(Parse$(MID$(L$, 7)))
+            SLEEP evalNum(MID$(L1$, 7))
         ELSEIF L$ = "PRINT" OR L$ = "?" THEN
             PRINT
-        ELSEIF LEFT$(L$, 6) = "PRINT " OR LEFT$(L$, 1) = "?" THEN
-            IF LEFT$(L$, 2) = "? " THEN L1$ = "PRINT " + MID$(L1$, 3): L$ = L1$
-            IF LEFT$(L$, 1) = "?" THEN L1$ = "PRINT " + MID$(L1$, 2): L$ = L1$
-
-            DIM retainCursor AS _BYTE
-            IF RIGHT$(L$, 1) = ";" THEN
-                retainCursor = true
-                L$ = LEFT$(L$, LEN(L$) - 1)
-                L1$ = LEFT$(L1$, LEN(L$))
-            ELSE
-                retainCursor = false
-            END IF
-
-            PRINT Parse(MID$(L1$, 7));
-            IF NOT retainCursor THEN PRINT
+        ELSEIF LEFT$(L$, 6) = "PRINT " THEN
+            doPrint MID$(L1$, 7)
+        ELSEIF LEFT$(L$, 1) = "?" THEN
+            doPrint MID$(L1$, 2)
         ELSEIF LEFT$(L$, 7) = "_TITLE " THEN
             temp$ = Parse$(MID$(L1$, 8))
             _TITLE temp$
@@ -755,22 +753,9 @@ DO
         ELSEIF L$ = "END" THEN
             IF running THEN running = false
         ELSEIF LEFT$(L$, 6) = "INPUT " THEN
-            DIM varName$, d$, d%
-            varName$ = MID$(L1$, 7)
-            varIndex = addVar(varName$)
-            IF vars(varIndex).type = varTypeSTRING THEN
-                INPUT "", d$
-                strings(varIndex) = d$
-            ELSE
-                SELECT CASE vars(varIndex).type
-                    CASE varTypeINTEGER
-                        INPUT "", d%
-                        nums(varIndex) = d%
-                    CASE ELSE
-                        INPUT "", d##
-                        nums(varIndex) = d##
-                END SELECT
-            END IF
+            doInput MID$(L1$, 7), false
+        ELSEIF LEFT$(L$, 11) = "LINE INPUT " THEN
+            doInput MID$(L1$, 12), true
         ELSEIF LEFT$(L$, 4) = "FOR " THEN
             IF NOT running THEN
                 PRINT "Not valid in immediate mode."
@@ -784,6 +769,7 @@ DO
                     running = false
                     GOTO Parse.Done
                 ELSE
+                    DIM forInitial AS _FLOAT
                     currentForLevel = currentForLevel + 1
                     IF forControl(currentForLevel).level.firstLine <> currentLine THEN
                         forControl(currentForLevel).level.firstLine = currentLine
@@ -794,18 +780,24 @@ DO
 
                     forControl(currentForLevel).firstRun = true
                     forControl(currentForLevel).varName = _TRIM$(MID$(L1$, 5, i - 5))
-                    forControl(currentForLevel).initial = VAL(Parse$(MID$(L1$, i + 1, j - i - 1)))
+                    forInitial = evalNum(MID$(L1$, i + 1, j - i - 1))
                     IF l THEN
-                        forControl(currentForLevel).final = VAL(Parse$(MID$(L1$, j + 4, l - j - 4)))
-                        forControl(currentForLevel).theStep = VAL(Parse$(MID$(L1$, l + 6)))
+                        forControl(currentForLevel).final = evalNum(MID$(L1$, j + 4, l - j - 4))
+                        forControl(currentForLevel).theStep = evalNum(MID$(L1$, l + 6))
                     ELSE
-                        forControl(currentForLevel).final = VAL(Parse$(MID$(L1$, j + 4)))
+                        forControl(currentForLevel).final = evalNum(MID$(L1$, j + 4))
                         forControl(currentForLevel).theStep = 1
                     END IF
+                    IF errorHappened THEN GOTO Parse.Done
 
-                    L1$ = forControl(currentForLevel).varName + "=" + STR$(forControl(currentForLevel).initial) + ": NEXT"
-                    L$ = UCASE$(L1$)
-                    GOTO redoThisLine
+                    varIndex = addVar(forControl(currentForLevel).varName)
+                    IF vars(varIndex).type = varTypeSTRING OR vars(varIndex).protected THEN throwError 13: GOTO Parse.Done
+                    forControl(currentForLevel).varIndex = varIndex
+                    nums(varIndex) = coerce(forInitial, vars(varIndex).type)
+                    'QB64 converts the limits to the loop variable's type
+                    forControl(currentForLevel).final = coerce(forControl(currentForLevel).final, vars(varIndex).type)
+                    forControl(currentForLevel).theStep = coerce(forControl(currentForLevel).theStep, vars(varIndex).type)
+                    GOTO treatAsNext
                 END IF
             END IF
         ELSEIF L$ = "NEXT" THEN
@@ -816,51 +808,39 @@ DO
                     GOTO Parse.Done
                 ELSE
                     treatAsNext:
-                    IF forControl(currentForLevel).varIndex = 0 THEN
-                        forControl(currentForLevel).varIndex = addVar(forControl(currentForLevel).varName) 'acquire var index
-                    END IF
-
+                    DIM forFirst AS _BYTE, forDone AS _BYTE
                     varIndex = forControl(currentForLevel).varIndex
+                    forFirst = forControl(currentForLevel).firstRun
 
-                    IF forControl(currentForLevel).firstRun THEN
+                    IF forFirst THEN
                         forControl(currentForLevel).firstRun = false
                     ELSE
                         forControl(currentForLevel).level.lastLine = currentLine
-                        IF vars(varIndex).type = varTypeINTEGER THEN
-                            nums(varIndex) = INT(nums(varIndex) + forControl(currentForLevel).theStep)
-                        ELSE
-                            nums(varIndex) = nums(varIndex) + forControl(currentForLevel).theStep
-                        END IF
+                        nums(varIndex) = coerce(nums(varIndex) + forControl(currentForLevel).theStep, vars(varIndex).type)
                     END IF
 
                     IF forControl(currentForLevel).theStep < 0 THEN
-                        IF nums(varIndex) < forControl(currentForLevel).final THEN
-                            GOTO treatAsExitFor
-                        ELSE
-                            currentLine = forControl(currentForLevel).level.firstLine
-                            continuation$ = ""
-                            Ucontinuation$ = ""
-                            IF forControl(currentForLevel).level.continueAt > 0 THEN
-                                continuation$ = ""
-                                Ucontinuation$ = ""
-                                L1$ = MID$(program(currentLine), forControl(currentForLevel).level.continueAt)
-                                L$ = UCASE$(L1$)
-                                GOTO redoThisLine
-                            END IF
-                        END IF
+                        forDone = (nums(varIndex) < forControl(currentForLevel).final)
                     ELSE
-                        IF nums(varIndex) > forControl(currentForLevel).final THEN
-                            GOTO treatAsExitFor
-                        ELSE
-                            currentLine = forControl(currentForLevel).level.firstLine
-                            continuation$ = ""
-                            Ucontinuation$ = ""
-                            IF forControl(currentForLevel).level.continueAt > 0 THEN
-                                L1$ = MID$(program(currentLine), forControl(currentForLevel).level.continueAt)
-                                L$ = UCASE$(L1$)
-                                GOTO redoThisLine
-                            END IF
-                        END IF
+                        forDone = (nums(varIndex) > forControl(currentForLevel).final)
+                    END IF
+                    IF forDone THEN
+                        'FOR whose range is empty: skip the body; loop that just
+                        'finished at NEXT: carry on after NEXT
+                        IF forFirst THEN GOTO treatAsExitFor
+                        currentForLevel = currentForLevel - 1
+                        GOTO Parse.Done
+                    END IF
+
+                    'next iteration: continue right after the FOR statement
+                    currentLine = forControl(currentForLevel).level.firstLine
+                    continuation$ = ""
+                    Ucontinuation$ = ""
+                    IF forControl(currentForLevel).level.continueAt > 0 THEN
+                        stmtPos = forControl(currentForLevel).level.continueAt
+                        L1$ = MID$(program(currentLine), stmtPos)
+                        L$ = UCASE$(L1$)
+                        GOTO redoThisLine
                     END IF
                 END IF
             ELSE
@@ -874,7 +854,7 @@ DO
                     PRINT "NEXT without FOR on line"; currentLine
                     GOTO Parse.Done
                 ELSE
-                    IF _TRIM$(MID$(L1$, 6)) <> forControl(currentForLevel).varName THEN
+                    IF UCASE$(_TRIM$(MID$(L1$, 6))) <> UCASE$(forControl(currentForLevel).varName) THEN
                         running = false
                         PRINT "Incorrect variable after NEXT on line"; currentLine
                         GOTO Parse.Done
@@ -896,20 +876,14 @@ DO
                     treatAsExitFor:
                     IF forControl(currentForLevel).level.lastLine > 0 THEN
                         currentLine = forControl(currentForLevel).level.lastLine
-                        currentForLevel = currentForLevel - 1
                     ELSE
-                        DO
-                            currentLine = currentLine + 1
-                            IF currentLine > UBOUND(program) THEN PRINT "FOR without NEXT on line"; forControl(currentForLevel).level.firstLine: running = false: GOTO Parse.Done
-                            L1$ = program(currentLine)
-                            L1$ = LTRIM$(RTRIM$(L1$))
-                            L$ = UCASE$(L1$)
-                            IF L$ = "NEXT" OR LEFT$(L$, 5) = "NEXT " THEN
-                                currentForLevel = currentForLevel - 1
-                                EXIT DO
-                            END IF
-                        LOOP
+                        j = findBlockEnd(continuation$, currentLine, 2)
+                        IF j = 0 THEN PRINT "FOR without NEXT on line"; forControl(currentForLevel).level.firstLine: running = false: GOTO Parse.Done
+                        currentLine = j
                     END IF
+                    currentForLevel = currentForLevel - 1
+                    continuation$ = ""
+                    Ucontinuation$ = ""
                 END IF
             ELSE
                 PRINT "Not valid in immediate mode."
@@ -921,7 +895,7 @@ DO
                 PRINT "Not valid in immediate mode."
                 GOTO Parse.Done
             END IF
-        ELSEIF L$ = "DO" THEN
+        ELSEIF L$ = "DO" OR LEFT$(L$, 9) = "DO UNTIL " OR LEFT$(L$, 9) = "DO WHILE " THEN
             IF running THEN
                 currentDoLevel = currentDoLevel + 1
                 IF loopControl(currentDoLevel).firstLine <> currentLine THEN
@@ -929,38 +903,19 @@ DO
                     loopControl(currentDoLevel).lastLine = 0
                     loopControl(currentDoLevel).continueAt = continueAt
                 END IF
-                loopControl(currentDoLevel).condition = 0
-            ELSE
-                PRINT "Not valid in immediate mode."
-                GOTO Parse.Done
-            END IF
-        ELSEIF LEFT$(L$, 9) = "DO UNTIL " THEN
-            IF running THEN
-                currentDoLevel = currentDoLevel + 1
-                IF loopControl(currentDoLevel).firstLine <> currentLine THEN
-                    loopControl(currentDoLevel).firstLine = currentLine
-                    loopControl(currentDoLevel).lastLine = 0
-                    loopControl(currentDoLevel).continueAt = continueAt
-                END IF
-                loopControl(currentDoLevel).condition = 1
-                IF VAL(Parse$(MID$(L$, 10))) <> 0 THEN
-                    GOTO treatAsExitDo
-                END IF
-            ELSE
-                PRINT "Not valid in immediate mode."
-                GOTO Parse.Done
-            END IF
-        ELSEIF LEFT$(L$, 9) = "DO WHILE " THEN
-            IF running THEN
-                currentDoLevel = currentDoLevel + 1
-                IF loopControl(currentDoLevel).firstLine <> currentLine THEN
-                    loopControl(currentDoLevel).firstLine = currentLine
-                    loopControl(currentDoLevel).lastLine = 0
-                    loopControl(currentDoLevel).continueAt = continueAt
-                END IF
-                loopControl(currentDoLevel).condition = 1
-                IF VAL(Parse$(MID$(L$, 10))) = 0 THEN
-                    GOTO treatAsExitDo
+                loopControl(currentDoLevel).stmtPos = stmtPos
+                IF L$ = "DO" THEN
+                    loopControl(currentDoLevel).condition = 0
+                ELSE
+                    loopControl(currentDoLevel).condition = 1
+                    DIM doCond AS _FLOAT
+                    doCond = evalNum(MID$(L1$, 10))
+                    IF errorHappened THEN GOTO Parse.Done
+                    IF LEFT$(L$, 9) = "DO UNTIL " THEN
+                        IF doCond <> 0 THEN GOTO treatAsExitDo
+                    ELSE
+                        IF doCond = 0 THEN GOTO treatAsExitDo
+                    END IF
                 END IF
             ELSE
                 PRINT "Not valid in immediate mode."
@@ -969,7 +924,7 @@ DO
         ELSEIF LEFT$(L$, 5) = "GOTO " THEN
             IF running THEN
                 DIM theLabel$
-                theLabel$ = MID$(L$, 6)
+                theLabel$ = _TRIM$(MID$(L$, 6))
 
                 IF isNumber(theLabel$) THEN theLabel$ = theLabel$ + " " ELSE theLabel$ = theLabel$ + ": "
                 'look for label
@@ -977,6 +932,8 @@ DO
                     temp$ = UCASE$(_TRIM$(program(i))) + " "
                     IF LEFT$(temp$, INSTR(temp$, " ")) = UCASE$(theLabel$) THEN
                         currentLine = i - 1
+                        continuation$ = ""
+                        Ucontinuation$ = ""
                         GOTO Parse.Done
                     END IF
                 NEXT
@@ -985,59 +942,60 @@ DO
                 PRINT "Not valid in immediate mode."
                 GOTO Parse.Done
             END IF
-        ELSEIF L$ = "LOOP" THEN
-            IF running THEN
-                treatAsLoop:
-                IF currentDoLevel > 0 AND loopControl(currentDoLevel).firstLine > 0 THEN
-                    currentLine = loopControl(currentDoLevel).firstLine - 1
+        ELSEIF L$ = "LOOP" OR LEFT$(L$, 11) = "LOOP UNTIL " OR LEFT$(L$, 11) = "LOOP WHILE " THEN
+            IF NOT running THEN
+                PRINT "Not valid in immediate mode."
+                GOTO Parse.Done
+            END IF
+
+            IF currentDoLevel = 0 THEN
+                'not inside a DO we know about (e.g. after GOTO): scan backwards for it
+                j = 0
+                FOR i = currentLine - 1 TO 1 STEP -1
+                    temp$ = UCASE$(_TRIM$(program(i)))
+                    IF temp$ = "LOOP" OR LEFT$(temp$, 5) = "LOOP " THEN j = j + 1
+                    IF temp$ = "DO" OR LEFT$(temp$, 3) = "DO " OR LEFT$(temp$, 3) = "DO:" THEN
+                        IF j = 0 THEN EXIT FOR
+                        j = j - 1
+                    END IF
+                NEXT
+                IF i < 1 THEN PRINT "LOOP without DO on line"; currentLine: running = false: GOTO Parse.Done
+                currentDoLevel = 1
+                loopControl(1).firstLine = i
+                loopControl(1).lastLine = currentLine
+                loopControl(1).stmtPos = 1
+                loopControl(1).condition = 0
+            END IF
+
+            IF L$ <> "LOOP" THEN
+                IF loopControl(currentDoLevel).condition = 1 THEN PRINT "LOOP UNTIL/WHILE not allowed in the same block as DO UNTIL/WHILE on line"; currentLine: running = false: GOTO Parse.Done
+                loopControl(currentDoLevel).condition = 2
+                DIM loopCond AS _FLOAT
+                loopCond = evalNum(MID$(L1$, 12))
+                IF errorHappened THEN GOTO Parse.Done
+                IF LEFT$(L$, 11) = "LOOP UNTIL " THEN loopCond = (loopCond = 0)
+                IF loopCond = 0 THEN
+                    'loop ends
                     currentDoLevel = currentDoLevel - 1
-                    IF loopControl(currentDoLevel).continueAt > 0 THEN
-                        L1$ = MID$(program(currentLine), loopControl(currentDoLevel).continueAt)
-                        L$ = UCASE$(L1$)
-                        GOTO redoThisLine
-                    END IF
-                ELSE
-                    IF currentDoLevel = 0 THEN
-                        'scan backwards until a DO is found
-                        FOR i = currentLine - 1 TO 1
-                            IF UCASE$(_TRIM$(program(i))) = "DO" OR LEFT$(UCASE$(_TRIM$(program(i))), 3) = "DO " THEN
-                                currentDoLevel = currentDoLevel + 1
-                                loopControl(currentDoLevel).firstLine = i
-                                loopControl(currentDoLevel).lastLine = currentLine
-                                GOTO treatAsLoop
-                            END IF
-                        NEXT
-                        IF i = 0 THEN PRINT "LOOP without DO on line"; currentLine: running = false: GOTO Parse.Done
-                    END IF
+                    GOTO Parse.Done
                 END IF
+            END IF
+
+            'jump back to the DO statement
+            loopControl(currentDoLevel).lastLine = currentLine
+            i = loopControl(currentDoLevel).stmtPos
+            currentLine = loopControl(currentDoLevel).firstLine
+            currentDoLevel = currentDoLevel - 1
+            continuation$ = ""
+            Ucontinuation$ = ""
+            IF i > 1 THEN
+                'DO is in the middle of its line
+                stmtPos = i
+                L1$ = MID$(program(currentLine), i)
+                L$ = UCASE$(L1$)
+                GOTO redoThisLine
             ELSE
-                PRINT "Not valid in immediate mode."
-                GOTO Parse.Done
-            END IF
-        ELSEIF LEFT$(L$, 11) = "LOOP UNTIL " THEN
-            IF NOT running THEN
-                PRINT "Not valid in immediate mode."
-                GOTO Parse.Done
-            END IF
-            IF currentDoLevel = 0 THEN PRINT "LOOP without DO on line"; currentLine: running = false: GOTO Parse.Done
-            IF loopControl(currentDoLevel).condition = 1 THEN PRINT "LOOP UNTIL/WHILE not allowed in the same block as DO UNTIL/WHILE on line"; currentLine: running = false: GOTO Parse.Done
-            loopControl(currentDoLevel).condition = 2
-            IF VAL(Parse$(MID$(L$, 12))) = 0 THEN
-                GOTO treatAsLoop
-            ELSE
-                currentDoLevel = currentDoLevel - 1
-            END IF
-        ELSEIF LEFT$(L$, 11) = "LOOP WHILE " THEN
-            IF NOT running THEN
-                PRINT "Not valid in immediate mode."
-                GOTO Parse.Done
-            END IF
-            IF currentDoLevel = 0 THEN PRINT "LOOP without DO on line"; currentLine: running = false: GOTO Parse.Done
-            IF loopControl(currentDoLevel).condition = 1 THEN PRINT "LOOP UNTIL/WHILE not allowed in the same block as DO UNTIL/WHILE on line"; currentLine: running = false: GOTO Parse.Done
-            IF VAL(Parse$(MID$(L$, 12))) <> 0 THEN
-                GOTO treatAsLoop
-            ELSE
-                currentDoLevel = currentDoLevel - 1
+                currentLine = currentLine - 1
             END IF
         ELSEIF L$ = "EXIT DO" THEN
             IF running THEN
@@ -1048,71 +1006,41 @@ DO
                 treatAsExitDo:
                 IF loopControl(currentDoLevel).lastLine > 0 THEN
                     currentLine = loopControl(currentDoLevel).lastLine
-                    currentDoLevel = currentDoLevel - 1
                 ELSE
-                    DO
-                        currentLine = currentLine + 1
-                        IF currentLine > UBOUND(program) THEN PRINT "DO without LOOP on line"; loopControl(currentDoLevel).firstLine: running = false: GOTO Parse.Done
-                        L1$ = program(currentLine)
-                        L1$ = LTRIM$(RTRIM$(L1$))
-                        L$ = UCASE$(L1$)
-                        IF L$ = "LOOP" OR LEFT$(L$, 11) = "LOOP UNTIL " OR LEFT$(L$, 11) = "LOOP WHILE " THEN
-                            currentDoLevel = currentDoLevel - 1
-                            EXIT DO
-                        END IF
-                    LOOP
+                    j = findBlockEnd(continuation$, currentLine, 1)
+                    IF j = 0 THEN PRINT "DO without LOOP on line"; loopControl(currentDoLevel).firstLine: running = false: GOTO Parse.Done
+                    currentLine = j
                 END IF
+                currentDoLevel = currentDoLevel - 1
+                continuation$ = ""
+                Ucontinuation$ = ""
             ELSE
                 PRINT "Not valid in immediate mode."
                 GOTO Parse.Done
             END IF
         ELSEIF LEFT$(L$, 7) = "SCREEN " THEN
-            SCREEN VAL(Parse$(MID$(L$, 8)))
+            SCREEN evalNum(MID$(L1$, 8))
         ELSEIF LEFT$(L$, 12) = "_SCREENMOVE " THEN
-            c$ = MID$(L$, 13)
-            IF INSTR(c$, ",") THEN
-                c1$ = LEFT$(c$, INSTR(c$, ",") - 1)
-                c2$ = MID$(c$, INSTR(c$, ",") + 1)
-                IF LEN(c1$) > 0 AND LEN(c2$) > 0 THEN
-                    _SCREENMOVE VAL(Parse(c1$)), VAL(Parse(c2$))
-                ELSE
-                    GOTO syntaxerror
-                END IF
+            IF _TRIM$(MID$(L$, 13)) = "_MIDDLE" THEN
+                _SCREENMOVE _MIDDLE
             ELSE
-                GOTO syntaxerror
+                REDIM arg$(0)
+                IF splitArgs(MID$(L1$, 13), arg$()) <> 2 THEN GOTO syntaxerror
+                IF LEN(arg$(1)) = 0 OR LEN(arg$(2)) = 0 THEN GOTO syntaxerror
+                _SCREENMOVE evalNum(arg$(1)), evalNum(arg$(2))
             END IF
         ELSEIF L$ = "ELSE" OR LEFT$(L$, 7) = "ELSEIF " THEN
             IF running THEN
-                'skip "ELSE"/"ELSEIF" block (should have already been skipped in the IF evaluation)
+                'reached the end of the branch that ran: skip to the matching END IF
                 IF LEFT$(L$, 7) = "ELSEIF " AND RIGHT$(L$, 5) <> " THEN" THEN
                     PRINT "Expected ELSEIF condition THEN on line"; currentLine
                     running = false
                     GOTO Parse.Done
                 END IF
-                temp$ = L$
-                IF LEN(L$) > 4 THEN temp$ = "ELSEIF"
-                DO
-                    j = currentLine
-                    currentLine = currentLine + 1
-                    IF currentLine > UBOUND(program) AND currentIfLevel > 0 THEN
-                        PRINT "IF without END IF on line"; currentLine
-                        running = false
-                        GOTO Parse.Done
-                    ELSEIF currentLine > UBOUND(program) THEN
-                        PRINT "ELSE without IF on line"; j
-                        running = false
-                        GOTO Parse.Done
-                    END IF
-                    L1$ = program(currentLine)
-                    L1$ = LTRIM$(RTRIM$(L1$))
-                    L$ = UCASE$(L1$)
-                    IF L$ = "END IF" OR L$ = "ENDIF" THEN currentIfLevel = currentIfLevel - 1: EXIT DO
-                    IF L$ = "ELSE" AND temp$ = "ELSE" THEN
-                        PRINT "ELSE used more than once on line"; currentLine
-                        running = false
-                        GOTO Parse.Done
-                    END IF
-                LOOP
+                j = findBlockEnd("", currentLine, 3)
+                IF j = 0 THEN PRINT "IF without END IF on line"; currentLine: running = false: GOTO Parse.Done
+                currentLine = j
+                currentIfLevel = currentIfLevel - 1
             ELSE
                 PRINT "Not valid in immediate mode."
             END IF
@@ -1130,16 +1058,18 @@ DO
                     GOTO Parse.Done
                 END IF
 
-                DIM i$
+                DIM i$, ifCond AS _FLOAT
 
                 currentIfLevel = currentIfLevel + 1
                 db_echo "IF block, line" + STR$(currentLine)
                 db_echo "Current IF level:" + STR$(currentIfLevel)
 
                 checkBlockCondition:
-                i$ = MID$(L$, 4, LEN(L$) - 8)
+                i$ = MID$(L1$, 4, LEN(L1$) - 8)
+                ifCond = evalNum(i$)
+                IF errorHappened THEN GOTO Parse.Done
 
-                IF VAL(Parse(i$)) = 0 THEN 'condition is false
+                IF ifCond = 0 THEN 'condition is false
                     j = currentIfLevel
                     DO
                         currentLine = currentLine + 1
@@ -1150,35 +1080,23 @@ DO
                         IF LEFT$(L$, 3) = "IF " AND RIGHT$(L$, 5) = " THEN" THEN
                             'new if level...
                             currentIfLevel = currentIfLevel + 1
-                            db_echo "New IF line:" + STR$(currentLine)
-                            db_echo "New IF level:" + STR$(currentIfLevel)
                             _CONTINUE
                         END IF
                         IF L$ = "END IF" OR L$ = "ENDIF" THEN
-                            IF currentIfLevel = j THEN
-                                db_echo "Proper END IF found:" + STR$(currentLine)
-                                EXIT DO
-                            ELSE
-                                currentIfLevel = currentIfLevel - 1
-                                db_echo "Inner END IF found; level:" + STR$(currentIfLevel)
-                            END IF
+                            currentIfLevel = currentIfLevel - 1
+                            IF currentIfLevel = j - 1 THEN EXIT DO
                         END IF
-                        IF LEFT$(L$, 7) = "ELSEIF " THEN
-                            IF RIGHT$(L$, 5) = " THEN" AND currentIfLevel = j THEN
-                                db_echo "ELSEIF found; same level:" + STR$(currentIfLevel)
+                        IF LEFT$(L$, 7) = "ELSEIF " AND currentIfLevel = j THEN
+                            IF RIGHT$(L$, 5) = " THEN" THEN
                                 L$ = MID$(L$, 5)
                                 L1$ = MID$(L1$, 5)
                                 GOTO checkBlockCondition
-                            ELSEIF currentIfLevel = j THEN
+                            ELSE
                                 PRINT "Expected ELSEIF condition THEN on line"; currentLine: running = false: GOTO Parse.Done
                             END IF
                         END IF
-                        IF L$ = "ELSE" AND currentIfLevel = j THEN
-                            db_echo "ELSE block found; same level:" + STR$(currentIfLevel)
-                            EXIT DO
-                        END IF
+                        IF L$ = "ELSE" AND currentIfLevel = j THEN EXIT DO
                         IF LEFT$(L$, 5) = "ELSE " AND currentIfLevel = j THEN
-                            db_echo "ELSE line found; same level:" + STR$(currentIfLevel)
                             L$ = MID$(L$, 6)
                             L1$ = MID$(L1$, 6)
                             GOTO redoThisLine
@@ -1196,9 +1114,9 @@ DO
                 END IF
 
                 i$ = MID$(LEFT$(L1$, j), 3)
-                db_echo "Condition: '" + i$ + "'"
-                IF VAL(Parse(i$)) <> 0 THEN
-                    db_echo "condition passed! ---------------->"
+                ifCond = evalNum(i$)
+                IF errorHappened THEN GOTO Parse.Done
+                IF ifCond <> 0 THEN
                     L$ = MID$(L$, j + 6)
                     L1$ = MID$(L1$, j + 6)
                     j = Find(1, L$, " ELSE ")
@@ -1208,24 +1126,24 @@ DO
                         L$ = LEFT$(L$, j - 1)
                         L1$ = LEFT$(L1$, j - 1)
                     END IF
-                    db_echo "Redoing line as '" + L$ + "'"
                     GOTO redoThisLine
                 ELSE
-                    db_echo "condition is false! <----------------"
                     'look for ELSE
                     j = Find(j, L$, " ELSE ")
                     IF j = 0 THEN j = Find(1, L$, ":ELSE ")
                     IF j THEN
                         L$ = MID$(L$, j + 6)
                         L1$ = MID$(L1$, j + 6)
-                        db_echo "ELSE: Redoing line as '" + L$ + "'"
                         GOTO redoThisLine
                     END IF
                 END IF
             END IF
-        ELSEIF INSTR(L$, "=") > 0 THEN
+        ELSEIF Find(1, L$, "=") > 0 THEN
             'Assignment
-            varName$ = RTRIM$(LEFT$(L1$, INSTR(L1$, "=") - 1))
+            IF LEFT$(L$, 4) = "LET " THEN L1$ = MID$(L1$, 5): L$ = MID$(L$, 5)
+            j = Find(1, L1$, "=")
+            varName$ = _TRIM$(LEFT$(L1$, j - 1))
+            IF validName(varName$) = 0 THEN GOTO syntaxerror
             varIndex = addVar(varName$) 'either add or acquire existing index
 
             IF vars(varIndex).protected THEN
@@ -1240,20 +1158,14 @@ DO
                 GOTO Parse.Done
             END IF
 
-            DIM v$, t$
-            IF vars(varIndex).type = varTypeSTRING THEN
-                v$ = RTRIM$(LTRIM$(MID$(L1$, INSTR(L1$, "=") + 1)))
-                strings(varIndex) = Parse(v$)
+            DIM asg AS valType
+            evaluate MID$(L1$, j + 1), asg
+            IF errorHappened THEN GOTO Parse.Done
+            IF (vars(varIndex).type = varTypeSTRING) <> (asg.isText <> 0) THEN throwError 13: GOTO Parse.Done
+            IF asg.isText THEN
+                strings(varIndex) = asg.s
             ELSE
-                v$ = MID$(L1$, INSTR(L1$, "=") + 1)
-
-                t$ = Parse(v$)
-
-                IF vars(varIndex).type = varTypeINTEGER THEN
-                    nums(varIndex) = INT(VAL(t$))
-                ELSE
-                    nums(varIndex) = VAL(t$)
-                END IF
+                nums(varIndex) = coerce(asg.n, vars(varIndex).type)
             END IF
         ELSE
             'label?
@@ -1274,17 +1186,30 @@ DO
     END IF
 
     Parse.Done:
-    IF LEN(Ucontinuation$) THEN L$ = Ucontinuation$: L1$ = continuation$: GOTO redoThisLine
+    IF runtimeErr THEN
+        throwError runtimeErr
+        runtimeErr = 0
+    END IF
+    IF errorHappened THEN Ucontinuation$ = "": continuation$ = ""
+    IF LEN(Ucontinuation$) THEN
+        L$ = Ucontinuation$: L1$ = continuation$
+        stmtPos = continueAt
+        GOTO redoThisLine
+    END IF
     IF externalLimit > 0 AND running THEN _LIMIT externalLimit
     IF currentIfLevel < 0 THEN currentIfLevel = 0
 LOOP
 
-'oops:
-'IF MyBad THEN RESUME NEXT
-'RESUME Parse.Done
+runtimeError:
+'Errors raised by QB64 while running a statement (bad LOCATE arguments,
+'missing files, ...). Remember the first one and let the statement finish;
+'it's reported at Parse.Done and stops the program.
+IF MyBad THEN RESUME NEXT
+IF runtimeErr = 0 THEN runtimeErr = ERR
+RESUME NEXT
 
 FUNCTION addVar~& (varName$)
-    DIM found AS LONG
+    DIM found AS LONG, h AS LONG
 
     'check if var exists
     found = searchVar(varName$)
@@ -1298,15 +1223,38 @@ FUNCTION addVar~& (varName$)
         REDIM _PRESERVE nums(totalVars + 99) AS _FLOAT
     END IF
 
-    vars(totalVars).name = varName$
-
-    'type detection -----------------------------------------------------------
+    vars(totalVars).name = _TRIM$(varName$)
+    vars(totalVars).key = LCASE$(vars(totalVars).name)
     vars(totalVars).type = detectType(varName$)
-    '--------------------------------------------------------------------------
-
     vars(totalVars).scope = thisScope$
+    vars(totalVars).protected = false
+    strings(totalVars) = ""
+    nums(totalVars) = 0
+
+    h = hashKey(vars(totalVars).key)
+    vars(totalVars).nextHash = varHash(h)
+    varHash(h) = totalVars
+
     addVar~& = totalVars
 END FUNCTION
+
+FUNCTION hashKey& (k$)
+    DIM i AS LONG, h AS LONG
+    FOR i = 1 TO LEN(k$)
+        h = (h * 31 + ASC(k$, i)) AND varHashSize
+    NEXT
+    hashKey& = h
+END FUNCTION
+
+SUB rebuildVarHash
+    DIM i AS LONG, h AS LONG
+    FOR i = 0 TO varHashSize: varHash(i) = 0: NEXT
+    FOR i = 1 TO totalVars
+        h = hashKey(vars(i).key)
+        vars(i).nextHash = varHash(h)
+        varHash(h) = i
+    NEXT
+END SUB
 
 FUNCTION detectType%% (__varname$)
     DIM varname$
@@ -1346,21 +1294,14 @@ FUNCTION detectType%% (__varname$)
     END IF
 END FUNCTION
 
-FUNCTION searchVar~& (__varName$)
-    DIM i AS LONG, found AS _BYTE
-    DIM varName$
-
-    varName$ = __varName$
-
-    'check if var exists
-    FOR i = 1 TO totalVars
-        IF LCASE$(LTRIM$(RTRIM$(vars(i).name))) = LCASE$(LTRIM$(RTRIM$(varName$))) THEN
-            found = true
-            EXIT FOR
-        END IF
-    NEXT
-
-    IF found THEN searchVar~& = i
+FUNCTION searchVar~& (varName$)
+    DIM i AS LONG, k$
+    k$ = LCASE$(_TRIM$(varName$))
+    i = varHash(hashKey(k$))
+    DO WHILE i
+        IF vars(i).key = k$ THEN searchVar~& = i: EXIT FUNCTION
+        i = vars(i).nextHash
+    LOOP
 END FUNCTION
 
 FUNCTION load%% (file$)
@@ -1406,837 +1347,6 @@ FUNCTION removeQuote$ (__text$)
     END IF
 
     removeQuote$ = text$
-END FUNCTION
-
-FUNCTION GetVal## (__c$, foundAsText AS _BYTE, textReturn$)
-    DIM c$, sp AS LONG
-    DIM varIndex AS LONG
-    DIM temp##, temp$
-
-    'db_echo "entering getval(): " + __c$
-
-    c$ = LTRIM$(RTRIM$(__c$))
-    foundAsText = false
-
-    IF LEFT$(c$, 1) = CHR$(34) THEN
-        'db_echo "literal string"
-        foundAsText = true
-        textReturn$ = removeQuote$(c$)
-        EXIT FUNCTION
-    END IF
-
-    sp = INSTR(c$, CHR$(32))
-    IF sp THEN
-        temp$ = MID$(c$, sp + 1)
-        temp## = VAL(temp$)
-        c$ = LEFT$(c$, sp - 1)
-    END IF
-
-    varIndex = searchVar(c$)
-    IF varIndex THEN
-        IF vars(varIndex).protected THEN
-            'db_echo "returning QB64 function"
-            'db_echo "temp## =" + STR$(temp##)
-            'db_echo "temp$  =" + CHR$(34) + temp$ + CHR$(34)
-            SELECT CASE RTRIM$(vars(varIndex).name)
-                CASE "cos"
-                    GetVal## = COS(temp##)
-                CASE "val"
-                    GetVal## = VAL(temp$)
-                CASE "int"
-                    GetVal## = INT(temp##)
-                CASE "asc"
-                    GetVal## = ASC(temp$)
-                CASE "sin"
-                    GetVal## = SIN(temp##)
-                CASE "len"
-                    GetVal## = LEN(temp$)
-                CASE "rnd"
-                    GetVal## = RND
-                CASE "timer"
-                    GetVal## = TIMER
-                CASE "time$"
-                    foundAsText = true
-                    textReturn$ = TIME$
-                CASE "date$"
-                    foundAsText = true
-                    textReturn$ = DATE$
-                CASE "chr$"
-                    foundAsText = true
-                    textReturn$ = CHR$(temp##)
-                CASE "str$"
-                    foundAsText = true
-                    textReturn$ = STR$(temp##)
-                CASE "inkey$"
-                    foundAsText = true
-                    textReturn$ = INKEY$
-                CASE "_width"
-                    GetVal## = _WIDTH
-                CASE "_height"
-                    GetVal## = _HEIGHT
-                CASE "_mousex"
-                    GetVal## = _MOUSEX
-                CASE "_mousey"
-                    GetVal## = _MOUSEY
-                CASE "_mousebutton"
-                    GetVal## = _MOUSEBUTTON(temp##)
-                CASE "_resize"
-                    GetVal## = _RESIZE
-                CASE "_resizewidth"
-                    GetVal## = _RESIZEWIDTH
-                CASE "_resizeheight"
-                    GetVal## = _RESIZEHEIGHT
-                CASE "_scaledwidth"
-                    GetVal## = _SCALEDWIDTH
-                CASE "_scaledheight"
-                    GetVal## = _SCALEDHEIGHT
-                CASE "_screenhide"
-                    GetVal## = _SCREENHIDE
-                CASE "_console"
-                    GetVal## = _CONSOLE
-                CASE "_blink"
-                    GetVal## = _BLINK
-                CASE "_fileexists"
-                    GetVal## = _FILEEXISTS(temp$)
-                CASE "_direxists"
-                    GetVal## = _DIREXISTS(temp$)
-                CASE "_devices"
-                    GetVal## = _DEVICES
-                CASE "_device$"
-                    foundAsText = true
-                    textReturn$ = _DEVICE$
-                CASE "_deviceinput"
-                    GetVal## = _DEVICEINPUT
-                CASE "_lastbutton"
-                    GetVal## = _LASTBUTTON
-                CASE "_lastaxis"
-                    GetVal## = _LASTAXIS
-                CASE "_lastwheel"
-                    GetVal## = _LASTWHEEL
-                CASE "_button"
-                    GetVal## = _BUTTON
-                CASE "_buttonchange"
-                    GetVal## = _BUTTONCHANGE
-                CASE "_axis"
-                    GetVal## = _AXIS
-                CASE "_wheel"
-                    GetVal## = _WHEEL
-                CASE "_screenx"
-                    GetVal## = _SCREENX
-                CASE "_screeny"
-                    GetVal## = _SCREENY
-                CASE "_os$"
-                    foundAsText = true
-                    textReturn$ = _OS$
-                CASE "_title$"
-                    foundAsText = true
-                    textReturn$ = _TITLE$
-                CASE "_mapunicode"
-                    GetVal## = _MAPUNICODE(temp##)
-                CASE "_keydown"
-                    GetVal## = _KEYDOWN(temp##)
-                CASE "_keyhit"
-                    GetVal## = keyhit
-                CASE "_windowhandle"
-                    GetVal## = _WINDOWHANDLE
-                CASE "_screenimage"
-                    GetVal## = _SCREENIMAGE
-                CASE "_freetimer"
-                    GetVal## = _FREETIMER
-                CASE "_fullscreen"
-                    GetVal## = _FULLSCREEN
-                CASE "_smooth"
-                    GetVal## = _SMOOTH
-                CASE "_windowhasfocus"
-                    GetVal## = _WINDOWHASFOCUS
-                CASE "_clipboard$"
-                    foundAsText = true
-                    textReturn$ = _CLIPBOARD$
-                CASE "_clipboardimage"
-                    GetVal## = _CLIPBOARDIMAGE
-                CASE "_exit"
-                    GetVal## = _EXIT
-                CASE "_openhost"
-                    GetVal## = _OPENHOST(temp$)
-                CASE "_connected"
-                    GetVal## = _CONNECTED(temp##)
-                CASE "_connectionaddress", "_connectionaddress$"
-                    foundAsText = true
-                    textReturn$ = _CONNECTIONADDRESS$(temp##)
-                CASE "_openconnection"
-                    GetVal## = _OPENCONNECTION(temp##)
-                CASE "_openclient"
-                    GetVal## = _OPENCLIENT(temp$)
-                CASE "environ$"
-                    foundAsText = true
-                    textReturn$ = ENVIRON$(temp$)
-                CASE "_errorline"
-                    GetVal## = lineThatErrored
-                CASE "_inclerrorline"
-                    'GetVal## = _INCLERRORLINE
-                CASE "_acceptfiledrop"
-                    GetVal## = _ACCEPTFILEDROP
-                CASE "_totaldroppedfiles"
-                    GetVal## = _TOTALDROPPEDFILES
-                CASE "_droppedfile", "_droppedfile$"
-                    foundAsText = true
-                    textReturn$ = _DROPPEDFILE$
-                CASE "_newimage"
-                    'GetVal## = _newimage
-                CASE "_loadimage"
-                    GetVal## = _LOADIMAGE(temp$)
-                CASE "_copyimage"
-                    GetVal## = _COPYIMAGE(temp##)
-                CASE "_source"
-                    GetVal## = _SOURCE
-                CASE "_dest"
-                    GetVal## = _DEST
-                CASE "_display"
-                    GetVal## = _DISPLAY
-                CASE "_pixelsize"
-                    GetVal## = _PIXELSIZE
-                CASE "_clearcolor"
-                    GetVal## = _CLEARCOLOR
-                CASE "_blend"
-                    GetVal## = _BLEND
-                CASE "_defaultcolor"
-                    GetVal## = _DEFAULTCOLOR
-                CASE "_backgroundcolor"
-                    GetVal## = _BACKGROUNDCOLOR
-                CASE "_palettecolor"
-                    GetVal## = _PALETTECOLOR(temp##)
-                CASE "_loadfont"
-                    'GetVal## = _loadfont
-                CASE "_fontwidth"
-                    GetVal## = _FONTWIDTH
-                CASE "_fontheight"
-                    GetVal## = _FONTHEIGHT
-                CASE "_font"
-                    GetVal## = _FONT
-                CASE "_printwidth"
-                    GetVal## = _PRINTWIDTH(temp$)
-                CASE "_printmode"
-                    GetVal## = _PRINTMODE
-                CASE "_rgba"
-                    'GetVal## = _rgba
-                CASE "_rgba32"
-                    'GetVal## = _rgba32
-                CASE "_rgb"
-                    'GetVal## = _rgb
-                CASE "_rgb32"
-                    'GetVal## = _rgb32
-                CASE "_red"
-                    'GetVal## = _red
-                CASE "_red32"
-                    'GetVal## = _red32
-                CASE "_green"
-                    'GetVal## = _green
-                CASE "_green32"
-                    'GetVal## = _green32
-                CASE "_blue"
-                    'GetVal## = _blue
-                CASE "_blue32"
-                    'GetVal## = _blue32
-                CASE "_alpha"
-                    'GetVal## = _alpha
-                CASE "_alpha32"
-                    'GetVal## = _alpha32
-                CASE "_mouseinput"
-                    GetVal## = _MOUSEINPUT
-                CASE "_mousewheel"
-                    GetVal## = _MOUSEWHEEL
-                CASE "freefile"
-                    GetVal## = FREEFILE
-                CASE "shell"
-                    GetVal## = SHELL(temp$)
-                CASE "_shellhide"
-                    GetVal## = _SHELLHIDE(temp$)
-                CASE "command$"
-                    foundAsText = true
-                    textReturn$ = COMMAND$(temp##)
-                CASE "_commandcount"
-                    GetVal## = _COMMANDCOUNT
-                CASE "_sndrate"
-                    GetVal## = _SNDRATE
-                CASE "_sndopenraw"
-                    GetVal## = _SNDOPENRAW
-                CASE "_sndrawlen"
-                    GetVal## = _SNDRAWLEN
-                CASE "_sndlen"
-                    GetVal## = _SNDLEN(temp##)
-                CASE "_sndpaused"
-                    GetVal## = _SNDPAUSED(temp##)
-                CASE "_sndopen"
-                    GetVal## = _SNDOPEN(temp$)
-                CASE "_sndgetpos"
-                    GetVal## = _SNDGETPOS(temp##)
-                CASE "_sndplaying"
-                    GetVal## = _SNDPLAYING(temp##)
-                CASE "_sndcopy"
-                    GetVal## = _SNDCOPY(temp##)
-                CASE "seek"
-                    GetVal## = SEEK(temp##)
-                CASE "loc"
-                    GetVal## = LOC(temp##)
-                CASE "eof"
-                    GetVal## = EOF(temp##)
-                CASE "lof"
-                    GetVal## = LOF(temp##)
-                CASE "screen"
-                    'GetVal## = screen
-                CASE "point"
-                    'GetVal## = point
-                CASE "tab"
-                    foundAsText = true
-                    textReturn$ = TAB(temp##)
-                CASE "spc"
-                    foundAsText = true
-                    textReturn$ = SPC(temp##)
-                CASE "inp"
-                    GetVal## = INP(temp##)
-                CASE "pos"
-                    GetVal## = POS(temp##)
-                CASE "sgn"
-                    GetVal## = SGN(temp##)
-                CASE "lbound"
-                    'GetVal## = lbound
-                CASE "ubound"
-                    'GetVal## = ubound
-                CASE "oct$"
-                    foundAsText = true
-                    textReturn$ = OCT$(temp##)
-                CASE "hex$"
-                    foundAsText = true
-                    textReturn$ = HEX$(temp##)
-                CASE "exp"
-                    GetVal## = EXP(temp##)
-                CASE "fix"
-                    GetVal## = FIX(temp##)
-                CASE "cdbl"
-                    GetVal## = CDBL(temp##)
-                CASE "csng"
-                    GetVal## = CSNG(temp##)
-                CASE "_round"
-                    GetVal## = _ROUND(temp##)
-                CASE "cint"
-                    GetVal## = CINT(temp##)
-                CASE "clng"
-                    GetVal## = CLNG(temp##)
-                CASE "csrlin"
-                    GetVal## = CSRLIN
-                CASE "mki$"
-                    foundAsText = true
-                    textReturn$ = MKI$(temp##)
-                CASE "mkl$"
-                    foundAsText = true
-                    textReturn$ = MKL$(temp##)
-                CASE "mks$"
-                    foundAsText = true
-                    textReturn$ = MKS$(temp##)
-                CASE "mkd$"
-                    foundAsText = true
-                    textReturn$ = MKD$(temp##)
-                CASE "mksmbf$"
-                    foundAsText = true
-                    textReturn$ = MKSMBF$(temp##)
-                CASE "mkdmbf$"
-                    foundAsText = true
-                    textReturn$ = MKDMBF$(temp##)
-                CASE "_mk$"
-                    foundAsText = true
-                    'textReturn$ = _mk$
-                CASE "cvsmbf"
-                    GetVal## = CVSMBF(temp$)
-                CASE "cvdmbf"
-                    GetVal## = CVDMBF(temp$)
-                CASE "cvi"
-                    GetVal## = CVI(temp$)
-                CASE "cvl"
-                    GetVal## = CVL(temp$)
-                CASE "cvs"
-                    GetVal## = CVS(temp$)
-                CASE "cvd"
-                    GetVal## = CVD(temp$)
-                CASE "_cv"
-                    'GetVal## = _cv
-                CASE "string$"
-                    'foundAsText = true
-                    'textReturn$ = string$(temp##)
-                CASE "space$"
-                    foundAsText = true
-                    textReturn$ = SPACE$(temp##)
-                CASE "instr"
-                    'GetVal## = instr
-                CASE "_instrrev"
-                    'GetVal## = _instrrev
-                CASE "mid$"
-                    'foundAsText = true
-                    'textReturn$ = mid$
-                CASE "sqr"
-                    GetVal## = SQR(temp##)
-                CASE "tan"
-                    GetVal## = TAN(temp##)
-                CASE "atn"
-                    GetVal## = ATN(temp##)
-                CASE "log"
-                    GetVal## = LOG(temp##)
-                CASE "abs"
-                    GetVal## = ABS(temp##)
-                CASE "erl"
-                    GetVal## = lineThatErrored
-                CASE "err"
-                    GetVal## = ERR
-                CASE "ucase$"
-                    foundAsText = true
-                    textReturn$ = UCASE$(temp$)
-                CASE "lcase$"
-                    foundAsText = true
-                    textReturn$ = LCASE$(temp$)
-                CASE "left$"
-                    'foundAsText = true
-                    'textReturn$ = left$
-                CASE "right$"
-                    'foundAsText = true
-                    'textReturn$ = right$
-                CASE "ltrim$"
-                    foundAsText = true
-                    textReturn$ = LTRIM$(temp$)
-                CASE "rtrim$"
-                    foundAsText = true
-                    textReturn$ = RTRIM$(temp$)
-                CASE "_trim$"
-                    foundAsText = true
-                    textReturn$ = _TRIM$(temp$)
-                CASE "_cwd$"
-                    foundAsText = true
-                    textReturn$ = _CWD$
-                CASE "_startdir$"
-                    foundAsText = true
-                    textReturn$ = _STARTDIR$
-                CASE "_dir$"
-                    foundAsText = true
-                    textReturn$ = _DIR$(temp$)
-                CASE "_inclerrorfile$"
-                    foundAsText = true
-                    textReturn$ = _INCLERRORFILE$
-                CASE "_atan2"
-                    'GetVal## = _atan2
-                CASE "_hypot"
-                    'GetVal## = _hypot
-                CASE "_pi"
-                    IF temp$ = "" THEN temp## = 1
-                    GetVal## = _PI(temp##)
-                CASE "_desktopheight"
-                    GetVal## = _DESKTOPHEIGHT
-                CASE "_desktopwidth"
-                    GetVal## = _DESKTOPWIDTH
-                CASE "_screenexists"
-                    GetVal## = _SCREENEXISTS
-                CASE "_controlchr"
-                    GetVal## = _CONTROLCHR
-                CASE "_stricmp"
-                    'GetVal## = _stricmp
-                CASE "_strcmp"
-                    'GetVal## = _strcmp
-                CASE "_autodisplay"
-                    GetVal## = _AUTODISPLAY
-                CASE "_shr"
-                    'GetVal## = _shr
-                CASE "_shl"
-                    'GetVal## = _shl
-                CASE "_deflate$"
-                    foundAsText = true
-                    textReturn$ = _DEFLATE$(temp$)
-                CASE "_inflate$"
-                    foundAsText = true
-                    textReturn$ = _INFLATE$(temp$)
-                CASE "_readbit"
-                    'GetVal## = _readbit
-                CASE "_setbit"
-                    'GetVal## = _setbit
-                CASE "_resetbit"
-                    'GetVal## = _resetbit
-                CASE "_togglebit"
-                    'GetVal## = _togglebit
-            END SELECT
-        ELSEIF vars(varIndex).type = varTypeSTRING THEN
-            'db_echo "found in strings()"
-            foundAsText = true
-            textReturn$ = strings(varIndex)
-        ELSE
-            GetVal## = nums(varIndex)
-            'db_echo "returning nums()"
-        END IF
-    ELSE
-        'db_echo "not found as var"
-        IF detectType%%(c$) = varTypeSTRING THEN
-            foundAsText = true
-            textReturn$ = ""
-            'db_echo "returning an empty string"
-        ELSE
-            IF isNumber(c$) THEN
-                GetVal## = VAL(c$)
-                'db_echo "returning val()"
-            ELSE
-                'db_echo "returning 0"
-            END IF
-        END IF
-    END IF
-END FUNCTION
-
-FUNCTION Parse$ (__inputExpr AS STRING)
-    'Adapted from https://www.codeproject.com/Articles/1205435/Parsing-Mathematical-Expressions-in-VB-NET-Missi
-    ' Call this routine to perform the actual mathematic expression parsing
-    ' Comments retained from the original code are marked with OC.
-    DIM t AS LONG, index AS LONG
-    DIM totalStrings AS LONG
-    DIM inputExpr AS STRING, temp$
-    DIM returnAsText AS _BYTE, textReturn AS STRING
-    REDIM oe(0) AS LONG
-    REDIM strs(0) AS STRING
-
-    db_echo "------------------ Parsing: " + __inputExpr
-
-    IF LEFT$(__inputExpr, 1) = CHR$(34) AND INSTR(2, __inputExpr, CHR$(34)) = LEN(__inputExpr) THEN
-        'string literal
-        Parse$ = removeQuote(__inputExpr)
-        EXIT FUNCTION
-    END IF
-
-    inputExpr = "(" + __inputExpr + ")"
-
-    t = 1
-    'OC: Iterate through the characters of input string starting at the position of final character
-    FOR index = LEN(inputExpr) - 1 TO 0 STEP -1
-        'OC: For each character perform a check if its value is '('
-        IF ASC(inputExpr, index + 1) = 40 OR index = 0 THEN
-            DIM sb AS STRING
-            sb = ""
-            DIM n AS LONG
-            'OC: Perform a check if this is the first character in string
-            IF index = 0 THEN
-                'OC: If so assign n variable to the value of variable index
-                n = 1
-            ELSE
-                'OC: Otherwise assign n variable to the value of variable index + 1
-                n = index + 1
-            END IF
-
-            DIM exists AS _BYTE
-            DO
-                exists = false
-                DIM bracket AS _BYTE
-                bracket = false
-                'OC: Perform the iterations stepping forward into each succeeding character
-                'OC: starting at the position n = index + 1 until we've found a character equal to ')'
-                WHILE n < LEN(inputExpr) AND bracket = false
-                    'OC: Check if the current character is not ')'.
-                    IF ASC(inputExpr, n + 1) <> 41 THEN
-                        'OC: If so, append it to the temporary string buffer
-                        sb = sb + MID$(inputExpr, n + 1, 1)
-                        'OC: Otherwise break the loop execution
-                    ELSE
-                        bracket = true
-                    END IF
-                    'OC: Increment the n loop counter variable by 1
-                    n = n + 1
-                WEND
-                DIM r AS LONG
-                r = 0
-                'OC: Iterate through the array of positions
-                WHILE r <= UBOUND(oe) AND exists = false
-                    'OC: For each element perform a check if its value
-                    'OC: is equal to the position of the current ')' character
-                    IF oe(r) = n THEN
-                        'OC: If so, append the character ')' to the temporary string buffer and break
-                        'OC: the loop execution assigning the variable exists to the value 'true'
-                        exists = true
-                        sb = sb + ") "
-                    END IF
-                    r = r + 1
-                WEND
-
-                'OC: Repeat the following loop execution until we've found the character ')' at
-                'OC: the New position which is not in the array of positions
-            LOOP WHILE exists = true
-
-            'OC: If the current character's ')' position has not been previous found,
-            'OC: add the value of position to the array
-            IF exists = false THEN
-                REDIM _PRESERVE oe(UBOUND(oe) + 1)
-                oe(t) = n
-                t = t + 1
-            END IF
-
-            'OC: Add the currently obtained string containing a specific part of the expression to the array
-            totalStrings = totalStrings + 1
-            REDIM _PRESERVE strs(totalStrings)
-            strs(totalStrings) = sb
-        END IF
-    NEXT
-
-    'OC: Iterate through the array of the expression parts
-    FOR index = 1 TO totalStrings
-        'OC: Compute the result for the current part of the expression
-        DIM Result AS STRING
-        errorHappened = false
-        Result = STR$(Compute(strs(index), returnAsText, textReturn))
-        IF errorHappened THEN EXIT FUNCTION
-        IF returnAsText THEN Result = " " + textReturn
-
-        'OC: Iterate through all succeeding parts of the expression
-        FOR n = index TO totalStrings
-            'OC: For each part substitute the substring containing the current part of the expression
-            'OC: with its numerical value without parentheses.
-            strs(n) = Replace(strs(n), "(" + strs(index) + ")", Result, 0, 0)
-        NEXT
-    NEXT
-    'OC: Compute the numerical value of the last part (e.g. the numerical resulting value of the entire expression)
-    'OC: and return this value at the end of the following routine execution.
-    errorHappened = false
-    temp$ = STR$(Compute(strs(totalStrings), returnAsText, textReturn))
-    IF errorHappened THEN EXIT FUNCTION
-    IF returnAsText THEN
-        Parse$ = textReturn
-    ELSE
-        Parse$ = temp$
-    END IF
-END FUNCTION
-
-FUNCTION Compute## (expr AS STRING, foundAsText AS _BYTE, textReturn$)
-    DIM i AS LONG, j AS LONG
-    DIM l AS LONG, m AS LONG, lastIndex AS LONG
-    DIM totalElements AS LONG
-    DIM ch AS STRING, hasOperator%%
-    DIM quote AS _BYTE
-    DIM tempElement AS STRING, op1##, op2##, result##
-    DIM txtop1$, txtop2$, txtresult$
-    DIM getvalTxtRet1 AS _BYTE, getvalTxtResult1 AS STRING
-    DIM getvalTxtRet2 AS _BYTE, getvalTxtResult2 AS STRING
-    REDIM element(1000) AS STRING
-    STATIC op(8) AS STRING, validOP$
-
-    IF LEN(validOP$) = 0 THEN
-        validOP$ = "^*/+-=><"
-        FOR i = 1 TO LEN(validOP$)
-            op(i) = MID$(validOP$, i, 1)
-        NEXT
-    END IF
-
-    db_echo "* Entering Compute##(): " + expr
-
-    'break down expr into element()
-    FOR i = 1 TO LEN(expr)
-        ch = MID$(expr, i, 1)
-        IF ch = CHR$(34) THEN quote = NOT quote
-        IF INSTR(validOP$, ch) THEN
-            'this is an operator
-            IF quote THEN
-                tempElement = tempElement + ch
-            ELSE
-                IF LEN(tempElement) THEN GOSUB addElement
-                tempElement = ch
-                GOSUB addElement
-                tempElement = ""
-            END IF
-        ELSE
-            tempElement = tempElement + ch
-        END IF
-    NEXT
-    IF LEN(tempElement) THEN GOSUB addElement
-
-    IF debugging THEN
-        DIM el$, tempElCount AS LONG
-        el$ = ""
-        tempElCount = 0
-        FOR l = 1 TO totalElements
-            IF LEN(_TRIM$(element$(l))) > 0 THEN
-                tempElCount = tempElCount + 1
-                el$ = el$ + element(l)
-            END IF
-        NEXT
-        db_echo "** Total elements:" + STR$(tempElCount) + " **"
-        db_echo el$
-        db_echo "     ***"
-    END IF
-
-    FOR i = 1 TO LEN(validOP$)
-        FOR j = 1 TO totalElements
-            IF element(j) = op(i) THEN
-                hasOperator%% = true
-                l = 1
-                IF j - l > 0 THEN
-                    DO UNTIL LEN(_TRIM$(element(j - l))) > 0 AND INSTR(validOP$, element(j - l)) = 0
-                        l = l + 1
-                        IF j - l < 1 THEN EXIT FUNCTION
-                    LOOP
-                END IF
-                IF isNumber(element(j - l)) THEN
-                    op1## = VAL(element(j - l))
-                ELSE
-                    op1## = GetVal(element(j - l), getvalTxtRet1, getvalTxtResult1)
-                    IF getvalTxtRet1 THEN txtop1$ = getvalTxtResult1
-                END IF
-                db_echo "element(j - l) = " + element(j - l)
-                m = 1
-                IF j + m <= totalElements THEN
-                    DO UNTIL LEN(_TRIM$(element(j + m))) > 0 AND INSTR(validOP$, element(j + m)) = 0
-                        m = m + 1
-                        IF j + m > totalElements THEN EXIT FUNCTION
-                    LOOP
-                END IF
-                IF isNumber(element(j + m)) THEN
-                    op2## = VAL(element(j + m))
-                ELSE
-                    op2## = GetVal(element(j + m), getvalTxtRet2, getvalTxtResult2)
-                    IF getvalTxtRet2 THEN txtop2$ = getvalTxtResult2
-                END IF
-                db_echo "element(j + m) = " + element(j + m)
-                db_echo "op1=" + STR$(op1##) + "; oper=" + op(i) + "; op2=" + STR$(op2##)
-                db_echo "txtop1=" + txtop1$ + "; oper=" + op(i) + "; txtop2=" + txtop2$
-                SELECT CASE op(i)
-                    CASE "^"
-                        IF getvalTxtRet1 OR getvalTxtRet2 THEN throwError 13: EXIT FUNCTION
-                        foundAsText = false
-                        result## = op1## ^ op2##
-                    CASE "*"
-                        IF getvalTxtRet1 OR getvalTxtRet2 THEN throwError 13: EXIT FUNCTION
-                        foundAsText = false
-                        result## = op1## * op2##
-                    CASE "/"
-                        IF getvalTxtRet1 OR getvalTxtRet2 THEN throwError 13: EXIT FUNCTION
-                        foundAsText = false
-                        result## = op1## / op2##
-                    CASE "+"
-                        IF getvalTxtRet1 AND getvalTxtRet2 THEN
-                            txtresult$ = txtop1$ + txtop2$
-                            foundAsText = true
-                        ELSEIF NOT getvalTxtRet1 AND NOT getvalTxtRet2 THEN
-                            result## = op1## + op2##
-                            foundAsText = false
-                        ELSE
-                            throwError 13: EXIT FUNCTION
-                        END IF
-                    CASE "-"
-                        IF getvalTxtRet1 OR getvalTxtRet2 THEN throwError 13: EXIT FUNCTION
-                        result## = op1## - op2##
-                        foundAsText = false
-                    CASE "="
-                        IF getvalTxtRet1 AND getvalTxtRet2 THEN
-                            result## = (txtop1$ = txtop2$)
-                            foundAsText = true
-                        ELSEIF NOT getvalTxtRet1 AND NOT getvalTxtRet2 THEN
-                            result## = (op1## = op2##)
-                            foundAsText = false
-                        ELSE
-                            throwError 13: EXIT FUNCTION
-                        END IF
-                    CASE ">"
-                        IF getvalTxtRet1 AND getvalTxtRet2 THEN
-                            result## = (txtop1$ > txtop2$)
-                            foundAsText = true
-                        ELSEIF NOT getvalTxtRet1 AND NOT getvalTxtRet2 THEN
-                            result## = (op1## > op2##)
-                            foundAsText = false
-                        ELSE
-                            throwError 13: EXIT FUNCTION
-                        END IF
-                    CASE "<"
-                        IF getvalTxtRet1 AND getvalTxtRet2 THEN
-                            result## = (txtop1$ < txtop2$)
-                            foundAsText = true
-                        ELSEIF NOT getvalTxtRet1 AND NOT getvalTxtRet2 THEN
-                            result## = (op1## < op2##)
-                            foundAsText = false
-                        ELSE
-                            throwError 13: EXIT FUNCTION
-                        END IF
-                END SELECT
-                db_echo "temp result## =" + STR$(result##)
-                db_echo "temp txtresult$ =" + txtresult$
-                element(j - l) = ""
-                element(j + m) = ""
-                IF foundAsText THEN
-                    element(j) = txtresult$
-                ELSE
-                    element(j) = STR$(result##)
-                END IF
-                lastIndex = j
-                IF debugging THEN
-                    el$ = ""
-                    tempElCount = 0
-                    FOR l = 1 TO totalElements
-                        IF LEN(_TRIM$(element$(l))) > 0 THEN
-                            tempElCount = tempElCount + 1
-                            el$ = el$ + element(l)
-                        END IF
-                    NEXT
-                    db_echo "** Total elements:" + STR$(tempElCount) + " **"
-                    db_echo el$
-                    db_echo "     ***"
-                END IF
-            END IF
-        NEXT
-    NEXT
-
-    IF hasOperator%% = false AND totalElements = 1 THEN
-        IF isNumber(element(1)) THEN
-            op1## = VAL(element(1))
-        ELSE
-            op1## = GetVal(element(1), getvalTxtRet1, getvalTxtResult1)
-        END IF
-        IF getvalTxtRet1 THEN
-            foundAsText = true
-            textReturn$ = getvalTxtResult1
-        ELSE
-            foundAsText = false
-            Compute## = op1##
-        END IF
-    ELSE
-        IF foundAsText THEN
-            textReturn$ = element(lastIndex)
-        ELSE
-            Compute## = VAL(element(lastIndex))
-        END IF
-    END IF
-
-    EXIT FUNCTION
-    addElement:
-    totalElements = totalElements + 1
-    IF totalElements > UBOUND(element) THEN
-        REDIM _PRESERVE element(UBOUND(element) + 1000) AS STRING
-    END IF
-    element(totalElements) = tempElement
-    RETURN
-END FUNCTION
-
-FUNCTION Replace$ (TempText$, SubString$, NewString$, CaseSensitive AS _BYTE, TotalReplacements AS LONG)
-    DIM FindSubString AS LONG, Text$
-
-    IF LEN(TempText$) = 0 THEN EXIT SUB
-
-    Text$ = TempText$
-    TotalReplacements = 0
-    DO
-        IF CaseSensitive THEN
-            FindSubString = INSTR(FindSubString + 1, Text$, SubString$)
-        ELSE
-            FindSubString = INSTR(FindSubString + 1, UCASE$(Text$), UCASE$(SubString$))
-        END IF
-        IF FindSubString = 0 THEN EXIT DO
-        IF LEFT$(SubString$, 1) = "\" THEN 'Escape sequence
-            'Replace the Substring if it's not preceeded by another backslash
-            IF MID$(Text$, FindSubString - 1, 1) <> "\" THEN
-                Text$ = LEFT$(Text$, FindSubString - 1) + NewString$ + MID$(Text$, FindSubString + LEN(SubString$))
-                TotalReplacements = TotalReplacements + 1
-            END IF
-        ELSE
-            Text$ = LEFT$(Text$, FindSubString - 1) + NewString$ + MID$(Text$, FindSubString + LEN(SubString$))
-            TotalReplacements = TotalReplacements + 1
-        END IF
-    LOOP
-
-    Replace$ = Text$
 END FUNCTION
 
 FUNCTION isNumber%% (__a$)
@@ -2288,15 +1398,43 @@ SUB db_echo (text$)
 END SUB
 
 SUB throwError (code AS INTEGER)
-    IF running THEN PRINT "("; _TRIM$(STR$(_ERRORLINE)); ") "
-    PRINT "Error #"; code;
+    PRINT errorText$(code);
     IF running THEN
         PRINT " on line"; currentLine
         lineThatErrored = currentLine
         running = false
+    ELSE
+        PRINT
     END IF
+    lastErrorCode = code
     errorHappened = true
 END SUB
+
+FUNCTION errorText$ (code AS INTEGER)
+    SELECT CASE code
+        CASE 2: errorText$ = "Syntax error"
+        CASE 3: errorText$ = "RETURN without GOSUB"
+        CASE 4: errorText$ = "Out of DATA"
+        CASE 5: errorText$ = "Illegal function call"
+        CASE 6: errorText$ = "Overflow"
+        CASE 7: errorText$ = "Out of memory"
+        CASE 9: errorText$ = "Subscript out of range"
+        CASE 11: errorText$ = "Division by zero"
+        CASE 13: errorText$ = "Type mismatch"
+        CASE 52: errorText$ = "Bad file name or number"
+        CASE 53: errorText$ = "File not found"
+        CASE 54: errorText$ = "Bad file mode"
+        CASE 55: errorText$ = "File already open"
+        CASE 62: errorText$ = "Input past end of file"
+        CASE 64: errorText$ = "Bad file name"
+        CASE 68: errorText$ = "Device unavailable"
+        CASE 70: errorText$ = "Permission denied"
+        CASE 75: errorText$ = "Path/file access error"
+        CASE 76: errorText$ = "Path not found"
+        CASE 258: errorText$ = "Invalid handle"
+        CASE ELSE: errorText$ = "Error #" + _TRIM$(STR$(code))
+    END SELECT
+END FUNCTION
 
 FUNCTION Find& (start AS LONG, text$, subtext$)
     'like INSTR, but searches for subtext$ only outside quotation marks
@@ -2317,4 +1455,283 @@ FUNCTION Find& (start AS LONG, text$, subtext$)
     Find& = p
 END FUNCTION
 
+SUB doPrint (argText$)
+    'PRINT list: items separated by ; (no gap) or , (next 14-column zone).
+    'A trailing ; or , keeps the cursor on the same line.
+    DIM i AS LONG, c AS INTEGER, depth AS LONG, quote AS _BYTE
+    DIM start AS LONG, item$, lastSep$, v AS valType, col AS LONG, nxt AS LONG
+
+    start = 1
+    FOR i = 1 TO LEN(argText$) + 1
+        IF i <= LEN(argText$) THEN c = ASC(argText$, i) ELSE c = 0
+        IF c = 34 THEN quote = NOT quote
+        IF NOT quote THEN
+            IF c = 40 THEN depth = depth + 1
+            IF c = 41 THEN depth = depth - 1
+            IF c = 39 THEN c = 0: i = LEN(argText$) + 1 'comment
+        END IF
+        IF (quote = 0 AND depth = 0 AND (c = 59 OR c = 44)) OR c = 0 THEN
+            item$ = _TRIM$(MID$(argText$, start, i - start))
+            IF LEN(item$) THEN
+                evaluate item$, v
+                IF errorHappened THEN EXIT SUB
+                IF v.isText THEN PRINT v.s; ELSE PRINT numStr$(v.n, v.t); " ";
+                lastSep$ = ""
+            END IF
+            IF c = 59 THEN lastSep$ = ";"
+            IF c = 44 THEN
+                lastSep$ = ","
+                col = POS(0)
+                nxt = ((col - 1) \ 14 + 1) * 14 + 1
+                IF nxt > _WIDTH THEN PRINT ELSE PRINT SPACE$(nxt - col);
+            END IF
+            start = i + 1
+        END IF
+    NEXT
+    IF lastSep$ = "" THEN PRINT
+END SUB
+
+SUB doInput (argText$, lineMode AS _BYTE)
+    'INPUT ["prompt"{;|,}] var[, var...]   /   LINE INPUT ["prompt";] var$
+    DIM t$, prompt$, qmark AS _BYTE, k AS LONG, n AS LONG, i AS LONG
+    DIM answer$, idx AS LONG, ok AS _BYTE, item$
+    REDIM names$(0), values$(0)
+
+    t$ = _TRIM$(argText$)
+    IF LEFT$(t$, 1) = ";" THEN t$ = _TRIM$(MID$(t$, 2))
+    qmark = NOT lineMode
+    IF LEFT$(t$, 1) = CHR$(34) THEN
+        k = INSTR(2, t$, CHR$(34))
+        IF k = 0 THEN throwError 2: EXIT SUB
+        prompt$ = MID$(t$, 2, k - 2)
+        t$ = _TRIM$(MID$(t$, k + 1))
+        IF LEFT$(t$, 1) = "," THEN
+            qmark = false
+        ELSEIF LEFT$(t$, 1) <> ";" THEN
+            throwError 2: EXIT SUB
+        END IF
+        t$ = _TRIM$(MID$(t$, 2))
+    END IF
+
+    n = splitArgs(t$, names$())
+    IF n = 0 OR (lineMode AND n > 1) THEN throwError 2: EXIT SUB
+    FOR i = 1 TO n
+        IF LEN(names$(i)) = 0 THEN throwError 2: EXIT SUB
+    NEXT
+    IF lineMode AND detectType(names$(1)) <> varTypeSTRING THEN throwError 13: EXIT SUB
+
+    DO
+        PRINT prompt$;
+        IF qmark THEN PRINT "? ";
+        LINE INPUT answer$
+        IF lineMode THEN
+            idx = addVar(names$(1))
+            strings(idx) = answer$
+            EXIT SUB
+        END IF
+
+        ok = (splitArgs(answer$, values$()) = n) OR (n = 1)
+        IF n = 1 THEN values$(1) = _TRIM$(answer$)
+        IF ok THEN
+            FOR i = 1 TO n
+                item$ = values$(i)
+                IF detectType(names$(i)) <> varTypeSTRING THEN
+                    IF LEN(item$) > 0 AND isNumber(item$) = 0 THEN ok = false: EXIT FOR
+                END IF
+            NEXT
+        END IF
+        IF ok THEN EXIT DO
+        PRINT "Redo from start"
+    LOOP
+
+    FOR i = 1 TO n
+        idx = addVar(names$(i))
+        IF vars(idx).type = varTypeSTRING THEN
+            strings(idx) = removeQuote$(values$(i))
+        ELSE
+            nums(idx) = coerce(VAL(values$(i)), vars(idx).type)
+        END IF
+    NEXT
+END SUB
+
+SUB doCircle (argText$)
+    'CIRCLE [STEP](x, y), radius[, color[, start, end[, aspect]]]
+    DIM t$, k AS LONG, depth AS LONG, stepMode AS _BYTE, rest$
+    DIM x AS SINGLE, y AS SINGLE, r AS SINGLE, c AS _UNSIGNED LONG
+    DIM arcS AS SINGLE, arcE AS SINGLE, asp AS SINGLE
+    DIM hasArc AS _BYTE, hasAsp AS _BYTE, m AS LONG
+    REDIM xy$(0), p$(0)
+
+    IF _PIXELSIZE(_DEST) = 0 THEN throwError 5: EXIT SUB
+    t$ = _TRIM$(argText$)
+    IF UCASE$(LEFT$(t$, 4)) = "STEP" THEN stepMode = true: t$ = _TRIM$(MID$(t$, 5))
+    IF LEFT$(t$, 1) <> "(" THEN throwError 2: EXIT SUB
+    FOR k = 1 TO LEN(t$)
+        IF ASC(t$, k) = 40 THEN depth = depth + 1
+        IF ASC(t$, k) = 41 THEN depth = depth - 1: IF depth = 0 THEN EXIT FOR
+    NEXT
+    rest$ = _TRIM$(MID$(t$, k + 1))
+    IF splitArgs(MID$(t$, 2, k - 2), xy$()) <> 2 OR LEFT$(rest$, 1) <> "," THEN throwError 2: EXIT SUB
+    m = splitArgs(MID$(rest$, 2), p$())
+    IF m < 1 OR m > 5 THEN throwError 2: EXIT SUB
+
+    x = evalNum(xy$(1)): y = evalNum(xy$(2))
+    r = evalNum(p$(1))
+    c = _DEFAULTCOLOR
+    IF m >= 2 THEN IF LEN(p$(2)) THEN c = evalNum(p$(2))
+    arcS = 0: arcE = _PI(2)
+    IF m >= 3 THEN IF LEN(p$(3)) THEN arcS = evalNum(p$(3)): hasArc = true
+    IF m >= 4 THEN IF LEN(p$(4)) THEN arcE = evalNum(p$(4)): hasArc = true
+    IF m >= 5 THEN IF LEN(p$(5)) THEN asp = evalNum(p$(5)): hasAsp = true
+    IF errorHappened THEN EXIT SUB
+    IF stepMode THEN x = x + POINT(2): y = y + POINT(3)
+
+    IF hasArc AND hasAsp THEN
+        CIRCLE (x, y), r, c, arcS, arcE, asp
+    ELSEIF hasAsp THEN
+        CIRCLE (x, y), r, c, , , asp
+    ELSEIF hasArc THEN
+        CIRCLE (x, y), r, c, arcS, arcE
+    ELSE
+        CIRCLE (x, y), r, c
+    END IF
+END SUB
+
+FUNCTION validName%% (n$)
+    'a plain variable name: letter, then letters/digits/_/., then a type suffix
+    DIM i AS LONG, c AS INTEGER, body AS LONG
+    IF LEN(n$) = 0 THEN EXIT FUNCTION
+    c = ASC(UCASE$(n$), 1)
+    IF (c < 65 OR c > 90) AND c <> 95 THEN EXIT FUNCTION
+    body = LEN(n$)
+    DO WHILE body > 0
+        IF INSTR("$%&!#~`", MID$(n$, body, 1)) = 0 THEN EXIT DO
+        body = body - 1
+    LOOP
+    IF body = 0 OR body > 40 THEN EXIT FUNCTION 'QB64 limits names to 40 characters
+    FOR i = 1 TO body
+        IF isIdentChar(ASC(n$, i)) = 0 THEN EXIT FUNCTION
+    NEXT
+    IF body < LEN(n$) THEN IF detectType(n$) = varType_DEFAULT AND RIGHT$(n$, 1) <> "!" THEN EXIT FUNCTION
+    validName%% = true
+END FUNCTION
+
+FUNCTION splitStmts& (text$, st$())
+    'splits a line into its statements (uppercased, trimmed). A single-line
+    'IF keeps the rest of the line; a comment ends it.
+    DIM i AS LONG, start AS LONG, quote AS _BYTE, n AS LONG, c AS INTEGER, s$, st0 AS LONG
+    REDIM st$(1 TO 10)
+    start = 1
+    FOR i = 1 TO LEN(text$) + 1
+        IF i <= LEN(text$) THEN c = ASC(text$, i) ELSE c = 58
+        IF c = 34 THEN quote = NOT quote
+        IF c = 58 AND quote = 0 THEN
+            s$ = UCASE$(_TRIM$(MID$(text$, start, i - start)))
+            st0 = start
+            start = i + 1
+            IF LEFT$(s$, 1) = "'" OR LEFT$(s$, 4) = "REM " OR s$ = "REM" THEN EXIT FOR
+            IF LEN(s$) THEN
+                n = n + 1
+                IF n > UBOUND(st$) THEN REDIM _PRESERVE st$(1 TO n + 10)
+                st$(n) = s$
+                IF LEFT$(s$, 3) = "IF " AND RIGHT$(s$, 5) <> " THEN" THEN
+                    st$(n) = UCASE$(_TRIM$(MID$(text$, st0)))
+                    EXIT FOR
+                END IF
+            END IF
+        END IF
+    NEXT
+    splitStmts& = n
+END FUNCTION
+
+FUNCTION findBlockEnd& (rest$, fromLine AS LONG, kind AS INTEGER)
+    'Finds the line that closes the block we're in, honoring nesting.
+    'kind: 1 = DO/LOOP, 2 = FOR/NEXT, 3 = IF/END IF.
+    'rest$ is what follows the current statement on fromLine.
+    DIM ln AS LONG, n AS LONG, i AS LONG, depth AS LONG, s$, text$, closes AS LONG, k AS LONG
+    REDIM st$(0)
+    FOR ln = fromLine TO UBOUND(program)
+        IF ln = fromLine THEN text$ = rest$ ELSE text$ = program(ln)
+        n = splitStmts(text$, st$())
+        FOR i = 1 TO n
+            s$ = st$(i)
+            closes = 0
+            SELECT CASE kind
+                CASE 1
+                    IF s$ = "DO" OR LEFT$(s$, 3) = "DO " THEN depth = depth + 1
+                    IF s$ = "LOOP" OR LEFT$(s$, 5) = "LOOP " THEN closes = 1
+                CASE 2
+                    IF LEFT$(s$, 4) = "FOR " THEN depth = depth + 1
+                    IF s$ = "NEXT" THEN closes = 1
+                    IF LEFT$(s$, 5) = "NEXT " THEN
+                        closes = 1 'NEXT i, j closes two loops
+                        FOR k = 1 TO LEN(s$)
+                            IF ASC(s$, k) = 44 THEN closes = closes + 1
+                        NEXT
+                    END IF
+                CASE 3
+                    IF LEFT$(s$, 3) = "IF " AND RIGHT$(s$, 5) = " THEN" THEN depth = depth + 1
+                    IF s$ = "END IF" OR s$ = "ENDIF" THEN closes = 1
+            END SELECT
+            IF closes THEN
+                IF depth < closes THEN findBlockEnd& = ln: EXIT FUNCTION
+                depth = depth - closes
+            END IF
+        NEXT
+    NEXT
+END FUNCTION
+
+SUB clearVars
+    'removes user variables; built-in function names (protected) stay
+    DIM i AS LONG
+    FOR i = totalVars TO 1 STEP -1
+        IF NOT vars(i).protected THEN
+            totalVars = totalVars - 1
+            vars(i).name = ""
+            vars(i).key = ""
+            vars(i).type = 0
+            strings(i) = ""
+            nums(i) = 0
+        END IF
+    NEXT
+    rebuildVarHash
+END SUB
+
+FUNCTION fileArg$ (text$)
+    'file names may be given quoted ("my file.bas"), as a string expression
+    '(f$ + ".bas"), or bare (myfile.bas)
+    DIM t$
+    t$ = _TRIM$(text$)
+    IF INSTR(t$, CHR$(34)) > 0 OR INSTR(t$, "+") > 0 OR RIGHT$(t$, 1) = "$" THEN
+        fileArg$ = Parse$(t$)
+    ELSE
+        fileArg$ = t$
+    END IF
+END FUNCTION
+
+FUNCTION splitArgs& (text$, parts$())
+    'splits text$ at commas that are outside quotes and parentheses;
+    'returns the number of parts (an empty text$ gives 0)
+    DIM i AS LONG, c AS INTEGER, depth AS LONG, quote AS _BYTE, n AS LONG, start AS LONG
+    IF LEN(_TRIM$(text$)) = 0 THEN splitArgs& = 0: EXIT FUNCTION
+    REDIM parts$(1 TO 10)
+    start = 1
+    FOR i = 1 TO LEN(text$) + 1
+        IF i <= LEN(text$) THEN c = ASC(text$, i) ELSE c = 44
+        IF c = 34 THEN quote = NOT quote
+        IF NOT quote THEN
+            IF c = 40 THEN depth = depth + 1
+            IF c = 41 THEN depth = depth - 1
+            IF (c = 44 AND depth = 0) OR i > LEN(text$) THEN
+                n = n + 1
+                IF n > UBOUND(parts$) THEN REDIM _PRESERVE parts$(1 TO n + 10)
+                parts$(n) = _TRIM$(MID$(text$, start, i - start))
+                start = i + 1
+            END IF
+        END IF
+    NEXT
+    splitArgs& = n
+END FUNCTION
+
+'$include:'eval.bm'
 '$include:'qXed/qXed.bm'

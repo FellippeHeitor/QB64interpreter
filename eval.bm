@@ -1,0 +1,848 @@
+'eval.bm - expression evaluator
+'
+'Tokenizes an expression and evaluates it with a recursive-descent parser,
+'following QBasic operator precedence (highest first):
+'   ^   unary-   * /   \   MOD   + -   = <> < > <= >=   NOT   AND   OR   XOR   EQV   IMP
+'Each value carries its type (text, or one of the varType* numeric types) so
+'numbers print the way QB64 prints them.
+
+FUNCTION Parse$ (e$)
+    'Evaluates e$ and returns the result as text (numbers formatted like STR$).
+    DIM v AS valType
+    evaluate e$, v
+    IF evalErr THEN EXIT FUNCTION
+    IF v.isText THEN Parse$ = v.s ELSE Parse$ = numStr$(v.n, v.t)
+END FUNCTION
+
+FUNCTION evalNum## (e$)
+    DIM v AS valType
+    evaluate e$, v
+    IF evalErr THEN EXIT FUNCTION
+    IF v.isText THEN throwError 13: EXIT FUNCTION
+    evalNum## = v.n
+END FUNCTION
+
+SUB evaluate (e$, v AS valType)
+    db_echo "evaluate: " + e$
+    evalErr = 0
+    tokenize e$
+    tkPos = 1
+    v.isText = false: v.n = 0: v.s = "": v.t = varTypeSINGLE
+    pImp v
+    IF evalErr = 0 AND tkPos <= tkCount THEN evalErr = 2 'leftover tokens
+    IF evalErr THEN throwError evalErr
+END SUB
+
+'---------------------------------------------------------------- tokenizer
+SUB addTok (kind AS _BYTE, text$)
+    tkCount = tkCount + 1
+    IF tkCount + 1 > UBOUND(tkKind) THEN
+        REDIM _PRESERVE tkKind(tkCount + 50) AS _BYTE
+        REDIM _PRESERVE tkText(tkCount + 50) AS STRING
+    END IF
+    tkKind(tkCount) = kind
+    tkText(tkCount) = text$
+END SUB
+
+FUNCTION isIdentChar%% (c AS INTEGER)
+    isIdentChar%% = (c >= 65 AND c <= 90) OR (c >= 97 AND c <= 122) OR (c >= 48 AND c <= 57) OR c = 95 OR c = 46
+END FUNCTION
+
+SUB tokenize (e$)
+    DIM i AS LONG, j AS LONG, L AS LONG, c AS INTEGER, c2 AS INTEGER
+    DIM w$, two$
+
+    tkCount = 0
+    L = LEN(e$)
+    i = 1
+    DO WHILE i <= L
+        c = ASC(e$, i)
+        SELECT CASE c
+            CASE 32, 9
+                i = i + 1
+            CASE 39 ' apostrophe starts a comment
+                EXIT DO
+            CASE 34 'string literal
+                j = INSTR(i + 1, e$, CHR$(34))
+                IF j = 0 THEN j = L + 1 'unterminated: runs to end of line, as in QB
+                addTok tkSTR, MID$(e$, i + 1, j - i - 1)
+                i = j + 1
+            CASE 48 TO 57, 46 'number
+                j = i
+                DO WHILE j <= L
+                    c2 = ASC(e$, j)
+                    IF (c2 >= 48 AND c2 <= 57) OR c2 = 46 THEN
+                        j = j + 1
+                    ELSEIF c2 = 69 OR c2 = 101 OR c2 = 68 OR c2 = 100 THEN 'E/D exponent
+                        j = j + 1
+                        IF j <= L THEN
+                            IF ASC(e$, j) = 43 OR ASC(e$, j) = 45 THEN j = j + 1
+                        END IF
+                    ELSE
+                        EXIT DO
+                    END IF
+                LOOP
+                DO WHILE j <= L 'type suffix
+                    IF INSTR("!#%&~`", MID$(e$, j, 1)) = 0 THEN EXIT DO
+                    j = j + 1
+                LOOP
+                addTok tkNUM, MID$(e$, i, j - i)
+                i = j
+            CASE 38 '&H, &O, &B literals
+                c2 = 0
+                IF i < L THEN c2 = ASC(UCASE$(MID$(e$, i + 1, 1)))
+                IF c2 = 72 OR c2 = 79 OR c2 = 66 THEN
+                    j = i + 2
+                    DO WHILE j <= L
+                        IF isIdentChar(ASC(e$, j)) = 0 OR ASC(e$, j) = 46 THEN EXIT DO
+                        j = j + 1
+                    LOOP
+                    addTok tkNUM, MID$(e$, i, j - i)
+                    i = j
+                ELSE
+                    addTok tkOP, "&"
+                    i = i + 1
+                END IF
+            CASE 65 TO 90, 97 TO 122, 95 'identifier or keyword operator
+                j = i
+                DO WHILE j <= L
+                    IF isIdentChar(ASC(e$, j)) = 0 THEN EXIT DO
+                    j = j + 1
+                LOOP
+                DO WHILE j <= L 'type suffix
+                    IF INSTR("$!#%&~`", MID$(e$, j, 1)) = 0 THEN EXIT DO
+                    j = j + 1
+                LOOP
+                w$ = MID$(e$, i, j - i)
+                SELECT CASE UCASE$(w$)
+                    CASE "AND", "OR", "NOT", "XOR", "MOD", "EQV", "IMP"
+                        addTok tkOP, UCASE$(w$)
+                    CASE ELSE
+                        addTok tkIDENT, w$
+                END SELECT
+                i = j
+            CASE 40
+                addTok tkLPAREN, "(": i = i + 1
+            CASE 41
+                addTok tkRPAREN, ")": i = i + 1
+            CASE 44
+                addTok tkCOMMA, ",": i = i + 1
+            CASE ELSE
+                two$ = MID$(e$, i, 2)
+                SELECT CASE two$
+                    CASE "<>", "<=", ">="
+                        addTok tkOP, two$: i = i + 2
+                    CASE "=<"
+                        addTok tkOP, "<=": i = i + 2
+                    CASE "=>"
+                        addTok tkOP, ">=": i = i + 2
+                    CASE "><"
+                        addTok tkOP, "<>": i = i + 2
+                    CASE ELSE
+                        addTok tkOP, CHR$(c): i = i + 1
+                END SELECT
+        END SELECT
+    LOOP
+    addTok tkEND, "" 'sentinel
+    tkCount = tkCount - 1
+END SUB
+
+FUNCTION peekOp$
+    IF tkKind(tkPos) = tkOP THEN peekOp$ = tkText(tkPos)
+END FUNCTION
+
+'---------------------------------------------------------------- parser
+SUB pImp (v AS valType)
+    DIM r AS valType
+    pEqv v
+    DO WHILE evalErr = 0 AND peekOp$ = "IMP"
+        tkPos = tkPos + 1: pEqv r: binaryOp v, r, "IMP"
+    LOOP
+END SUB
+
+SUB pEqv (v AS valType)
+    DIM r AS valType
+    pXor v
+    DO WHILE evalErr = 0 AND peekOp$ = "EQV"
+        tkPos = tkPos + 1: pXor r: binaryOp v, r, "EQV"
+    LOOP
+END SUB
+
+SUB pXor (v AS valType)
+    DIM r AS valType
+    pOr v
+    DO WHILE evalErr = 0 AND peekOp$ = "XOR"
+        tkPos = tkPos + 1: pOr r: binaryOp v, r, "XOR"
+    LOOP
+END SUB
+
+SUB pOr (v AS valType)
+    DIM r AS valType
+    pAnd v
+    DO WHILE evalErr = 0 AND peekOp$ = "OR"
+        tkPos = tkPos + 1: pAnd r: binaryOp v, r, "OR"
+    LOOP
+END SUB
+
+SUB pAnd (v AS valType)
+    DIM r AS valType
+    pNot v
+    DO WHILE evalErr = 0 AND peekOp$ = "AND"
+        tkPos = tkPos + 1: pNot r: binaryOp v, r, "AND"
+    LOOP
+END SUB
+
+SUB pNot (v AS valType)
+    DIM q AS _INTEGER64
+    IF peekOp$ = "NOT" THEN
+        tkPos = tkPos + 1
+        pNot v
+        IF evalErr THEN EXIT SUB
+        IF v.isText THEN evalErr = 13: EXIT SUB
+        q = v.n
+        v.n = NOT q
+        IF typeRank(v.t) > 1 THEN v.t = varTypeLONG
+    ELSE
+        pRel v
+    END IF
+END SUB
+
+SUB pRel (v AS valType)
+    DIM r AS valType, op$
+    pAdd v
+    DO WHILE evalErr = 0
+        op$ = peekOp$
+        SELECT CASE op$
+            CASE "=", "<>", "<", ">", "<=", ">="
+                tkPos = tkPos + 1: pAdd r: binaryOp v, r, op$
+            CASE ELSE
+                EXIT DO
+        END SELECT
+    LOOP
+END SUB
+
+SUB pAdd (v AS valType)
+    DIM r AS valType, op$
+    pMod v
+    DO WHILE evalErr = 0
+        op$ = peekOp$
+        IF op$ <> "+" AND op$ <> "-" THEN EXIT DO
+        tkPos = tkPos + 1: pMod r: binaryOp v, r, op$
+    LOOP
+END SUB
+
+SUB pMod (v AS valType)
+    DIM r AS valType
+    pIDiv v
+    DO WHILE evalErr = 0 AND peekOp$ = "MOD"
+        tkPos = tkPos + 1: pIDiv r: binaryOp v, r, "MOD"
+    LOOP
+END SUB
+
+SUB pIDiv (v AS valType)
+    DIM r AS valType
+    pMul v
+    DO WHILE evalErr = 0 AND peekOp$ = "\"
+        tkPos = tkPos + 1: pMul r: binaryOp v, r, "\"
+    LOOP
+END SUB
+
+SUB pMul (v AS valType)
+    DIM r AS valType, op$
+    pNeg v
+    DO WHILE evalErr = 0
+        op$ = peekOp$
+        IF op$ <> "*" AND op$ <> "/" THEN EXIT DO
+        tkPos = tkPos + 1: pNeg r: binaryOp v, r, op$
+    LOOP
+END SUB
+
+SUB pNeg (v AS valType)
+    SELECT CASE peekOp$
+        CASE "-"
+            tkPos = tkPos + 1
+            pNeg v
+            IF evalErr THEN EXIT SUB
+            IF v.isText THEN evalErr = 13: EXIT SUB
+            v.n = -v.n
+        CASE "+"
+            tkPos = tkPos + 1
+            pNeg v
+        CASE ELSE
+            pPow v
+    END SELECT
+END SUB
+
+SUB pPow (v AS valType)
+    DIM r AS valType
+    pAtom v
+    DO WHILE evalErr = 0 AND peekOp$ = "^"
+        tkPos = tkPos + 1
+        IF peekOp$ = "-" THEN 'allow 2 ^ -1
+            tkPos = tkPos + 1
+            pAtom r
+            r.n = -r.n
+        ELSE
+            pAtom r
+        END IF
+        IF evalErr = 0 THEN binaryOp v, r, "^"
+    LOOP
+END SUB
+
+SUB pAtom (v AS valType)
+    DIM idx AS LONG, name$
+
+    v.isText = false: v.s = "": v.n = 0: v.t = varTypeSINGLE
+    SELECT CASE tkKind(tkPos)
+        CASE tkNUM
+            numLiteral tkText(tkPos), v
+            tkPos = tkPos + 1
+        CASE tkSTR
+            v.isText = true
+            v.s = tkText(tkPos)
+            tkPos = tkPos + 1
+        CASE tkLPAREN
+            tkPos = tkPos + 1
+            pImp v
+            IF evalErr THEN EXIT SUB
+            IF tkKind(tkPos) <> tkRPAREN THEN evalErr = 2: EXIT SUB
+            tkPos = tkPos + 1
+        CASE tkIDENT
+            name$ = tkText(tkPos)
+            tkPos = tkPos + 1
+            idx = searchVar(name$)
+            IF idx > 0 THEN
+                IF vars(idx).protected THEN pCall idx, v: EXIT SUB
+                IF vars(idx).type = varTypeSTRING THEN
+                    v.isText = true
+                    v.s = strings(idx)
+                ELSE
+                    v.n = nums(idx)
+                    v.t = vars(idx).type
+                END IF
+            ELSE
+                'unknown variable: empty string or zero of its type
+                v.t = detectType(name$)
+                IF v.t = varTypeSTRING THEN v.isText = true: v.t = varTypeSINGLE
+            END IF
+            IF tkKind(tkPos) = tkLPAREN THEN evalErr = 9 'arrays not supported yet
+        CASE ELSE
+            evalErr = 2
+    END SELECT
+END SUB
+
+SUB pCall (idx AS LONG, v AS valType)
+    'built-in function call; the name token is already consumed
+    DIM a(1 TO 8) AS valType, na AS INTEGER
+    IF tkKind(tkPos) = tkLPAREN THEN
+        tkPos = tkPos + 1
+        IF tkKind(tkPos) <> tkRPAREN THEN
+            DO
+                IF na = 8 THEN evalErr = 2: EXIT SUB
+                na = na + 1
+                pImp a(na)
+                IF evalErr THEN EXIT SUB
+                IF tkKind(tkPos) <> tkCOMMA THEN EXIT DO
+                tkPos = tkPos + 1
+            LOOP
+        END IF
+        IF tkKind(tkPos) <> tkRPAREN THEN evalErr = 2: EXIT SUB
+        tkPos = tkPos + 1
+    END IF
+    callBuiltin vars(idx).key, a(), na, v
+END SUB
+
+'---------------------------------------------------------------- numbers & types
+FUNCTION typeRank%% (t AS _BYTE)
+    SELECT CASE t
+        CASE varTypeSINGLE: typeRank%% = 2
+        CASE varTypeDOUBLE: typeRank%% = 3
+        CASE varType_FLOAT: typeRank%% = 4
+        CASE ELSE: typeRank%% = 1 'integer types
+    END SELECT
+END FUNCTION
+
+FUNCTION maxType%% (a AS _BYTE, b AS _BYTE)
+    IF typeRank(a) > typeRank(b) THEN
+        maxType%% = a
+    ELSEIF typeRank(b) > typeRank(a) THEN
+        maxType%% = b
+    ELSEIF a = b THEN
+        maxType%% = a
+    ELSE
+        maxType%% = varType_INTEGER64
+    END IF
+END FUNCTION
+
+FUNCTION atLeastSingle%% (t AS _BYTE)
+    IF typeRank(t) < 2 THEN atLeastSingle%% = varTypeSINGLE ELSE atLeastSingle%% = t
+END FUNCTION
+
+FUNCTION coerce## (n AS _FLOAT, t AS _BYTE)
+    'converts n the way QB64 does when storing it in a variable of type t
+    DIM i AS INTEGER, l AS LONG, s AS SINGLE, d AS DOUBLE
+    DIM b AS _BYTE, ub AS _UNSIGNED _BYTE, ui AS _UNSIGNED INTEGER
+    DIM ul AS _UNSIGNED LONG, i64 AS _INTEGER64, u64 AS _UNSIGNED _INTEGER64
+    SELECT CASE t
+        CASE varTypeINTEGER: i = n: coerce## = i
+        CASE varTypeLONG: l = n: coerce## = l
+        CASE varTypeSINGLE: s = n: coerce## = s
+        CASE varTypeDOUBLE: d = n: coerce## = d
+        CASE varType_BYTE: b = n: coerce## = b
+        CASE varType_UBYTE: ub = n: coerce## = ub
+        CASE varType_UINTEGER: ui = n: coerce## = ui
+        CASE varType_ULONG: ul = n: coerce## = ul
+        CASE varType_INTEGER64: i64 = n: coerce## = i64
+        CASE varType_UINTEGER64: u64 = n: coerce## = u64
+        CASE ELSE: coerce## = n
+    END SELECT
+END FUNCTION
+
+FUNCTION numStr$ (n AS _FLOAT, t AS _BYTE)
+    'formats n like QB64's STR$ for a value of type t
+    DIM s AS SINGLE, d AS DOUBLE, i64 AS _INTEGER64, u64 AS _UNSIGNED _INTEGER64
+    SELECT CASE typeRank(t)
+        CASE 1
+            IF n >= -9.2E+18 AND n <= 9.2E+18 THEN
+                i64 = n: numStr$ = STR$(i64)
+            ELSEIF n > 0 AND n <= 1.8E+19 THEN
+                u64 = n: numStr$ = STR$(u64)
+            ELSE
+                numStr$ = STR$(n)
+            END IF
+        CASE 2: s = n: numStr$ = STR$(s)
+        CASE 3: d = n: numStr$ = STR$(d)
+        CASE ELSE: numStr$ = STR$(n)
+    END SELECT
+END FUNCTION
+
+SUB numLiteral (text$, v AS valType)
+    DIM i AS LONG, body$, suffix$, digits AS LONG, c$, started AS _BYTE
+
+    v.isText = false
+    IF LEFT$(text$, 1) = "&" THEN
+        v.n = VAL(text$)
+        v.t = varTypeLONG
+        EXIT SUB
+    END IF
+
+    FOR i = 1 TO LEN(text$)
+        IF INSTR("!#%&~`", MID$(text$, i, 1)) THEN EXIT FOR
+    NEXT
+    body$ = LEFT$(text$, i - 1)
+    suffix$ = MID$(text$, i)
+    v.n = VAL(body$)
+
+    IF LEN(suffix$) THEN
+        v.t = detectType("x" + suffix$)
+    ELSEIF INSTR(body$, ".") OR INSTR(UCASE$(body$), "E") OR INSTR(UCASE$(body$), "D") THEN
+        'count significant digits of the mantissa
+        FOR i = 1 TO LEN(body$)
+            c$ = MID$(body$, i, 1)
+            IF INSTR("EeDd", c$) THEN EXIT FOR
+            IF c$ >= "1" AND c$ <= "9" THEN started = true
+            IF started AND c$ >= "0" AND c$ <= "9" THEN digits = digits + 1
+        NEXT
+        IF INSTR(UCASE$(body$), "D") OR digits > 7 THEN v.t = varTypeDOUBLE ELSE v.t = varTypeSINGLE
+    ELSEIF v.n >= -32768 AND v.n <= 32767 THEN
+        v.t = varTypeINTEGER
+    ELSEIF v.n >= -2147483648 AND v.n <= 2147483647 THEN
+        v.t = varTypeLONG
+    ELSEIF v.n >= -9.2E+18 AND v.n <= 9.2E+18 THEN
+        v.t = varType_INTEGER64
+    ELSE
+        v.t = varTypeDOUBLE
+    END IF
+    v.n = coerce(v.n, v.t)
+END SUB
+
+SUB binaryOp (v AS valType, r AS valType, op$)
+    DIM a AS _INTEGER64, b AS _INTEGER64, t AS _BYTE, res AS _BYTE
+
+    IF evalErr THEN EXIT SUB
+
+    IF v.isText OR r.isText THEN
+        IF v.isText = 0 OR r.isText = 0 THEN evalErr = 13: EXIT SUB
+        SELECT CASE op$
+            CASE "+": v.s = v.s + r.s: EXIT SUB
+            CASE "=": res = (v.s = r.s)
+            CASE "<>": res = (v.s <> r.s)
+            CASE "<": res = (v.s < r.s)
+            CASE ">": res = (v.s > r.s)
+            CASE "<=": res = (v.s <= r.s)
+            CASE ">=": res = (v.s >= r.s)
+            CASE ELSE: evalErr = 13: EXIT SUB
+        END SELECT
+        v.isText = false: v.s = ""
+        v.n = res: v.t = varTypeINTEGER
+        EXIT SUB
+    END IF
+
+    t = maxType(v.t, r.t)
+    SELECT CASE op$
+        CASE "+": v.n = v.n + r.n
+        CASE "-": v.n = v.n - r.n
+        CASE "*": v.n = v.n * r.n
+        CASE "/"
+            IF r.n = 0 THEN evalErr = 11: EXIT SUB
+            v.n = v.n / r.n
+            IF typeRank(t) = 1 THEN t = varTypeDOUBLE
+        CASE "^"
+            v.n = v.n ^ r.n
+            t = atLeastSingle(t)
+        CASE "=": v.n = (v.n = r.n): t = varTypeINTEGER
+        CASE "<>": v.n = (v.n <> r.n): t = varTypeINTEGER
+        CASE "<": v.n = (v.n < r.n): t = varTypeINTEGER
+        CASE ">": v.n = (v.n > r.n): t = varTypeINTEGER
+        CASE "<=": v.n = (v.n <= r.n): t = varTypeINTEGER
+        CASE ">=": v.n = (v.n >= r.n): t = varTypeINTEGER
+        CASE ELSE
+            'integer operators: operands are rounded first
+            a = v.n: b = r.n
+            IF typeRank(t) > 1 THEN t = varTypeLONG
+            SELECT CASE op$
+                CASE "\"
+                    IF b = 0 THEN evalErr = 11: EXIT SUB
+                    v.n = a \ b
+                CASE "MOD"
+                    IF b = 0 THEN evalErr = 11: EXIT SUB
+                    v.n = a MOD b
+                CASE "AND": v.n = a AND b
+                CASE "OR": v.n = a OR b
+                CASE "XOR": v.n = a XOR b
+                CASE "EQV": v.n = a EQV b
+                CASE "IMP": v.n = a IMP b
+                CASE ELSE: evalErr = 2: EXIT SUB
+            END SELECT
+    END SELECT
+    v.t = t
+END SUB
+
+'---------------------------------------------------------------- built-in functions
+FUNCTION argN## (a() AS valType, na AS INTEGER, i AS INTEGER)
+    IF i > na THEN EXIT FUNCTION
+    IF a(i).isText THEN evalErr = 13: EXIT FUNCTION
+    argN## = a(i).n
+END FUNCTION
+
+FUNCTION argS$ (a() AS valType, na AS INTEGER, i AS INTEGER)
+    IF i > na THEN EXIT FUNCTION
+    IF a(i).isText = 0 THEN evalErr = 13: EXIT FUNCTION
+    argS$ = a(i).s
+END FUNCTION
+
+SUB retN (v AS valType, n AS _FLOAT, t AS _BYTE)
+    v.isText = false: v.s = "": v.n = n: v.t = t
+END SUB
+
+SUB retS (v AS valType, s$)
+    v.isText = true: v.s = s$: v.n = 0
+END SUB
+
+SUB callBuiltin (nm$, a() AS valType, na AS INTEGER, v AS valType)
+    DIM x AS _FLOAT, mt AS _BYTE, s$, q AS _INTEGER64, b AS _INTEGER64
+
+    IF na >= 1 THEN mt = atLeastSingle(a(1).t) ELSE mt = varTypeSINGLE
+
+    SELECT CASE nm$
+        'math
+        CASE "cos": retN v, COS(argN(a(), na, 1)), mt
+        CASE "sin": retN v, SIN(argN(a(), na, 1)), mt
+        CASE "tan": retN v, TAN(argN(a(), na, 1)), mt
+        CASE "atn": retN v, ATN(argN(a(), na, 1)), mt
+        CASE "exp": retN v, EXP(argN(a(), na, 1)), mt
+        CASE "log"
+            x = argN(a(), na, 1)
+            IF x <= 0 THEN evalErr = 5: EXIT SUB
+            retN v, LOG(x), mt
+        CASE "sqr"
+            x = argN(a(), na, 1)
+            IF x < 0 THEN evalErr = 5: EXIT SUB
+            retN v, SQR(x), mt
+        CASE "abs": retN v, ABS(argN(a(), na, 1)), a(1).t
+        CASE "sgn": retN v, SGN(argN(a(), na, 1)), varTypeINTEGER
+        CASE "int": retN v, INT(argN(a(), na, 1)), a(1).t
+        CASE "fix": retN v, FIX(argN(a(), na, 1)), a(1).t
+        CASE "cint": retN v, coerce(argN(a(), na, 1), varTypeINTEGER), varTypeINTEGER
+        CASE "clng": retN v, coerce(argN(a(), na, 1), varTypeLONG), varTypeLONG
+        CASE "csng": retN v, coerce(argN(a(), na, 1), varTypeSINGLE), varTypeSINGLE
+        CASE "cdbl": retN v, argN(a(), na, 1), varTypeDOUBLE
+        CASE "_round": retN v, coerce(argN(a(), na, 1), varType_INTEGER64), varType_INTEGER64
+        CASE "rnd": retN v, RND, varTypeSINGLE
+        CASE "timer": retN v, TIMER, varTypeSINGLE
+        CASE "_pi"
+            IF na = 0 THEN x = 1 ELSE x = argN(a(), na, 1)
+            retN v, _PI(x), varTypeDOUBLE
+        CASE "_atan2": retN v, _ATAN2(argN(a(), na, 1), argN(a(), na, 2)), varTypeDOUBLE
+        CASE "_hypot": retN v, _HYPOT(argN(a(), na, 1), argN(a(), na, 2)), varTypeDOUBLE
+        CASE "_shl": q = argN(a(), na, 1): retN v, _SHL(q, argN(a(), na, 2)), varType_INTEGER64
+        CASE "_shr": q = argN(a(), na, 1): retN v, _SHR(q, argN(a(), na, 2)), varType_INTEGER64
+        CASE "_readbit": q = argN(a(), na, 1): retN v, _READBIT(q, argN(a(), na, 2)), varTypeINTEGER
+        CASE "_setbit": q = argN(a(), na, 1): retN v, _SETBIT(q, argN(a(), na, 2)), varType_INTEGER64
+        CASE "_resetbit": q = argN(a(), na, 1): retN v, _RESETBIT(q, argN(a(), na, 2)), varType_INTEGER64
+        CASE "_togglebit": q = argN(a(), na, 1): retN v, _TOGGLEBIT(q, argN(a(), na, 2)), varType_INTEGER64
+
+        'strings
+        CASE "val": retN v, VAL(argS(a(), na, 1)), varTypeDOUBLE
+        CASE "len": retN v, LEN(argS(a(), na, 1)), varTypeLONG
+        CASE "asc"
+            s$ = argS(a(), na, 1)
+            IF na >= 2 THEN q = argN(a(), na, 2) ELSE q = 1
+            IF q < 1 OR q > LEN(s$) THEN evalErr = 5: EXIT SUB
+            retN v, ASC(s$, q), varTypeINTEGER
+        CASE "chr$": retS v, CHR$(argN(a(), na, 1))
+        CASE "str$": retS v, numStr$(argN(a(), na, 1), a(1).t)
+        CASE "hex$": q = argN(a(), na, 1): retS v, HEX$(q)
+        CASE "oct$": q = argN(a(), na, 1): retS v, OCT$(q)
+        CASE "left$": retS v, LEFT$(argS(a(), na, 1), argN(a(), na, 2))
+        CASE "right$": retS v, RIGHT$(argS(a(), na, 1), argN(a(), na, 2))
+        CASE "mid$"
+            IF na >= 3 THEN
+                retS v, MID$(argS(a(), na, 1), argN(a(), na, 2), argN(a(), na, 3))
+            ELSE
+                retS v, MID$(argS(a(), na, 1), argN(a(), na, 2))
+            END IF
+        CASE "instr"
+            IF na >= 3 THEN
+                retN v, INSTR(argN(a(), na, 1), argS(a(), na, 2), argS(a(), na, 3)), varTypeLONG
+            ELSE
+                retN v, INSTR(argS(a(), na, 1), argS(a(), na, 2)), varTypeLONG
+            END IF
+        CASE "_instrrev"
+            IF na >= 3 THEN
+                retN v, _INSTRREV(argN(a(), na, 1), argS(a(), na, 2), argS(a(), na, 3)), varTypeLONG
+            ELSE
+                retN v, _INSTRREV(argS(a(), na, 1), argS(a(), na, 2)), varTypeLONG
+            END IF
+        CASE "string$"
+            IF na >= 2 THEN
+                IF a(2).isText THEN
+                    retS v, STRING$(argN(a(), na, 1), argS(a(), na, 2))
+                ELSE
+                    retS v, STRING$(argN(a(), na, 1), argN(a(), na, 2))
+                END IF
+            ELSE
+                evalErr = 5
+            END IF
+        CASE "space$": retS v, SPACE$(argN(a(), na, 1))
+        CASE "spc": retS v, SPACE$(argN(a(), na, 1))
+        CASE "tab"
+            q = argN(a(), na, 1) - POS(0)
+            IF q < 0 THEN q = 0
+            retS v, SPACE$(q)
+        CASE "ucase$": retS v, UCASE$(argS(a(), na, 1))
+        CASE "lcase$": retS v, LCASE$(argS(a(), na, 1))
+        CASE "ltrim$": retS v, LTRIM$(argS(a(), na, 1))
+        CASE "rtrim$": retS v, RTRIM$(argS(a(), na, 1))
+        CASE "_trim$": retS v, _TRIM$(argS(a(), na, 1))
+        CASE "_strcmp": retN v, _STRCMP(argS(a(), na, 1), argS(a(), na, 2)), varTypeINTEGER
+        CASE "_stricmp": retN v, _STRICMP(argS(a(), na, 1), argS(a(), na, 2)), varTypeINTEGER
+        CASE "time$": retS v, TIME$
+        CASE "date$": retS v, DATE$
+        CASE "inkey$": retS v, INKEY$
+        CASE "mki$": retS v, MKI$(argN(a(), na, 1))
+        CASE "mkl$": retS v, MKL$(argN(a(), na, 1))
+        CASE "mks$": retS v, MKS$(argN(a(), na, 1))
+        CASE "mkd$": retS v, MKD$(argN(a(), na, 1))
+        CASE "mksmbf$": retS v, MKSMBF$(argN(a(), na, 1))
+        CASE "mkdmbf$": retS v, MKDMBF$(argN(a(), na, 1))
+        CASE "cvi": retN v, CVI(argS(a(), na, 1)), varTypeINTEGER
+        CASE "cvl": retN v, CVL(argS(a(), na, 1)), varTypeLONG
+        CASE "cvs": retN v, CVS(argS(a(), na, 1)), varTypeSINGLE
+        CASE "cvd": retN v, CVD(argS(a(), na, 1)), varTypeDOUBLE
+        CASE "cvsmbf": retN v, CVSMBF(argS(a(), na, 1)), varTypeSINGLE
+        CASE "cvdmbf": retN v, CVDMBF(argS(a(), na, 1)), varTypeDOUBLE
+        CASE "_deflate$": retS v, _DEFLATE$(argS(a(), na, 1))
+        CASE "_inflate$": retS v, _INFLATE$(argS(a(), na, 1))
+
+        'screen & graphics
+        CASE "_width"
+            IF na THEN retN v, _WIDTH(argN(a(), na, 1)), varTypeLONG ELSE retN v, _WIDTH, varTypeLONG
+        CASE "_height"
+            IF na THEN retN v, _HEIGHT(argN(a(), na, 1)), varTypeLONG ELSE retN v, _HEIGHT, varTypeLONG
+        CASE "_pixelsize"
+            IF na THEN retN v, _PIXELSIZE(argN(a(), na, 1)), varTypeLONG ELSE retN v, _PIXELSIZE, varTypeLONG
+        CASE "csrlin": retN v, CSRLIN, varTypeINTEGER
+        CASE "pos": retN v, POS(0), varTypeINTEGER
+        CASE "screen"
+            IF na < 2 THEN evalErr = 5: EXIT SUB
+            IF na >= 3 THEN
+                retN v, SCREEN(argN(a(), na, 1), argN(a(), na, 2), argN(a(), na, 3)), varTypeLONG
+            ELSE
+                retN v, SCREEN(argN(a(), na, 1), argN(a(), na, 2)), varTypeLONG
+            END IF
+        CASE "point"
+            IF na >= 2 THEN
+                retN v, POINT(argN(a(), na, 1), argN(a(), na, 2)), varType_ULONG
+            ELSE
+                retN v, POINT(argN(a(), na, 1)), varTypeSINGLE
+            END IF
+        CASE "_rgb"
+            IF na >= 4 THEN
+                retN v, _RGB(argN(a(), na, 1), argN(a(), na, 2), argN(a(), na, 3), argN(a(), na, 4)), varType_ULONG
+            ELSE
+                retN v, _RGB(argN(a(), na, 1), argN(a(), na, 2), argN(a(), na, 3)), varType_ULONG
+            END IF
+        CASE "_rgba"
+            IF na >= 5 THEN
+                retN v, _RGBA(argN(a(), na, 1), argN(a(), na, 2), argN(a(), na, 3), argN(a(), na, 4), argN(a(), na, 5)), varType_ULONG
+            ELSE
+                retN v, _RGBA(argN(a(), na, 1), argN(a(), na, 2), argN(a(), na, 3), argN(a(), na, 4)), varType_ULONG
+            END IF
+        CASE "_rgb32"
+            SELECT CASE na
+                CASE 1: retN v, _RGB32(argN(a(), na, 1)), varType_ULONG
+                CASE 2: retN v, _RGB32(argN(a(), na, 1), argN(a(), na, 2)), varType_ULONG
+                CASE 3: retN v, _RGB32(argN(a(), na, 1), argN(a(), na, 2), argN(a(), na, 3)), varType_ULONG
+                CASE 4: retN v, _RGB32(argN(a(), na, 1), argN(a(), na, 2), argN(a(), na, 3), argN(a(), na, 4)), varType_ULONG
+                CASE ELSE: evalErr = 5
+            END SELECT
+        CASE "_rgba32": retN v, _RGBA32(argN(a(), na, 1), argN(a(), na, 2), argN(a(), na, 3), argN(a(), na, 4)), varType_ULONG
+        CASE "_red"
+            IF na >= 2 THEN retN v, _RED(argN(a(), na, 1), argN(a(), na, 2)), varTypeLONG ELSE retN v, _RED(argN(a(), na, 1)), varTypeLONG
+        CASE "_green"
+            IF na >= 2 THEN retN v, _GREEN(argN(a(), na, 1), argN(a(), na, 2)), varTypeLONG ELSE retN v, _GREEN(argN(a(), na, 1)), varTypeLONG
+        CASE "_blue"
+            IF na >= 2 THEN retN v, _BLUE(argN(a(), na, 1), argN(a(), na, 2)), varTypeLONG ELSE retN v, _BLUE(argN(a(), na, 1)), varTypeLONG
+        CASE "_alpha"
+            IF na >= 2 THEN retN v, _ALPHA(argN(a(), na, 1), argN(a(), na, 2)), varTypeLONG ELSE retN v, _ALPHA(argN(a(), na, 1)), varTypeLONG
+        CASE "_red32": retN v, _RED32(argN(a(), na, 1)), varTypeLONG
+        CASE "_green32": retN v, _GREEN32(argN(a(), na, 1)), varTypeLONG
+        CASE "_blue32": retN v, _BLUE32(argN(a(), na, 1)), varTypeLONG
+        CASE "_alpha32": retN v, _ALPHA32(argN(a(), na, 1)), varTypeLONG
+        CASE "_newimage"
+            IF na >= 3 THEN
+                retN v, _NEWIMAGE(argN(a(), na, 1), argN(a(), na, 2), argN(a(), na, 3)), varTypeLONG
+            ELSE
+                retN v, _NEWIMAGE(argN(a(), na, 1), argN(a(), na, 2), 32), varTypeLONG
+            END IF
+        CASE "_loadimage"
+            IF na >= 2 THEN
+                retN v, _LOADIMAGE(argS(a(), na, 1), argN(a(), na, 2)), varTypeLONG
+            ELSE
+                retN v, _LOADIMAGE(argS(a(), na, 1)), varTypeLONG
+            END IF
+        CASE "_copyimage"
+            IF na THEN retN v, _COPYIMAGE(argN(a(), na, 1)), varTypeLONG ELSE retN v, _COPYIMAGE(_SOURCE), varTypeLONG
+        CASE "_source": retN v, _SOURCE, varTypeLONG
+        CASE "_dest": retN v, _DEST, varTypeLONG
+        CASE "_display": retN v, _DISPLAY, varTypeLONG
+        CASE "_clearcolor": retN v, _CLEARCOLOR, varType_ULONG
+        CASE "_blend": retN v, _BLEND, varTypeLONG
+        CASE "_defaultcolor": retN v, _DEFAULTCOLOR, varType_ULONG
+        CASE "_backgroundcolor": retN v, _BACKGROUNDCOLOR, varType_ULONG
+        CASE "_palettecolor": retN v, _PALETTECOLOR(argN(a(), na, 1)), varType_ULONG
+        CASE "_loadfont"
+            IF na >= 3 THEN
+                retN v, _LOADFONT(argS(a(), na, 1), argN(a(), na, 2), argS(a(), na, 3)), varTypeLONG
+            ELSE
+                retN v, _LOADFONT(argS(a(), na, 1), argN(a(), na, 2)), varTypeLONG
+            END IF
+        CASE "_font": retN v, _FONT, varTypeLONG
+        CASE "_fontwidth": retN v, _FONTWIDTH, varTypeLONG
+        CASE "_fontheight": retN v, _FONTHEIGHT, varTypeLONG
+        CASE "_printwidth": retN v, _PRINTWIDTH(argS(a(), na, 1)), varTypeLONG
+        CASE "_printmode": retN v, _PRINTMODE, varTypeLONG
+        CASE "_blink": retN v, _BLINK, varTypeLONG
+        CASE "_autodisplay": retN v, _AUTODISPLAY, varTypeLONG
+        CASE "_controlchr": retN v, _CONTROLCHR, varTypeLONG
+
+        'input devices
+        CASE "_mousex": retN v, _MOUSEX, varTypeSINGLE
+        CASE "_mousey": retN v, _MOUSEY, varTypeSINGLE
+        CASE "_mousebutton": retN v, _MOUSEBUTTON(argN(a(), na, 1)), varTypeINTEGER
+        CASE "_mouseinput": retN v, _MOUSEINPUT, varTypeINTEGER
+        CASE "_mousewheel": retN v, _MOUSEWHEEL, varTypeINTEGER
+        CASE "_keydown": retN v, _KEYDOWN(argN(a(), na, 1)), varTypeINTEGER
+        CASE "_keyhit": retN v, keyhit, varTypeLONG
+        CASE "_devices": retN v, _DEVICES, varTypeLONG
+        CASE "_device$": retS v, _DEVICE$(argN(a(), na, 1))
+        CASE "_deviceinput"
+            IF na THEN retN v, _DEVICEINPUT(argN(a(), na, 1)), varTypeLONG ELSE retN v, _DEVICEINPUT, varTypeLONG
+        CASE "_lastbutton": retN v, _LASTBUTTON(argN(a(), na, 1)), varTypeLONG
+        CASE "_lastaxis": retN v, _LASTAXIS(argN(a(), na, 1)), varTypeLONG
+        CASE "_lastwheel": retN v, _LASTWHEEL(argN(a(), na, 1)), varTypeLONG
+        CASE "_button": retN v, _BUTTON(argN(a(), na, 1)), varTypeLONG
+        CASE "_buttonchange": retN v, _BUTTONCHANGE(argN(a(), na, 1)), varTypeLONG
+        CASE "_axis": retN v, _AXIS(argN(a(), na, 1)), varTypeSINGLE
+        CASE "_wheel": retN v, _WHEEL(argN(a(), na, 1)), varTypeSINGLE
+
+        'window & system
+        CASE "_resize": retN v, _RESIZE, varTypeLONG
+        CASE "_resizewidth": retN v, _RESIZEWIDTH, varTypeLONG
+        CASE "_resizeheight": retN v, _RESIZEHEIGHT, varTypeLONG
+        CASE "_scaledwidth": retN v, _SCALEDWIDTH, varTypeLONG
+        CASE "_scaledheight": retN v, _SCALEDHEIGHT, varTypeLONG
+        CASE "_screenhide": retN v, _SCREENHIDE, varTypeLONG
+        CASE "_console": retN v, _CONSOLE, varTypeLONG
+        CASE "_screenx": retN v, _SCREENX, varTypeLONG
+        CASE "_screeny": retN v, _SCREENY, varTypeLONG
+        CASE "_screenexists": retN v, _SCREENEXISTS, varTypeLONG
+        CASE "_screenimage": retN v, _SCREENIMAGE, varTypeLONG
+        CASE "_desktopwidth": retN v, _DESKTOPWIDTH, varTypeLONG
+        CASE "_desktopheight": retN v, _DESKTOPHEIGHT, varTypeLONG
+        CASE "_fullscreen": retN v, _FULLSCREEN, varTypeLONG
+        CASE "_smooth": retN v, _SMOOTH, varTypeLONG
+        CASE "_windowhasfocus": retN v, _WINDOWHASFOCUS, varTypeLONG
+        CASE "_windowhandle": retN v, _WINDOWHANDLE, varType_INTEGER64
+        CASE "_os$": retS v, _OS$
+        CASE "_title$": retS v, _TITLE$
+        CASE "_clipboard$": retS v, _CLIPBOARD$
+        CASE "_clipboardimage": retN v, _CLIPBOARDIMAGE, varTypeLONG
+        CASE "_exit": retN v, _EXIT, varTypeLONG
+        CASE "_mapunicode": retN v, _MAPUNICODE(argN(a(), na, 1)), varTypeLONG
+        CASE "_freetimer": retN v, _FREETIMER, varTypeLONG
+        CASE "environ$"
+            IF na >= 1 THEN
+                IF a(1).isText THEN retS v, ENVIRON$(argS(a(), na, 1)) ELSE retS v, ENVIRON$(argN(a(), na, 1))
+            ELSE
+                evalErr = 5
+            END IF
+        CASE "command$"
+            IF na THEN retS v, COMMAND$(argN(a(), na, 1)) ELSE retS v, COMMAND$
+        CASE "_commandcount": retN v, _COMMANDCOUNT, varTypeLONG
+        CASE "shell": retN v, SHELL(argS(a(), na, 1)), varTypeLONG
+        CASE "_shellhide": retN v, _SHELLHIDE(argS(a(), na, 1)), varTypeLONG
+        CASE "_errorline", "erl": retN v, lineThatErrored, varTypeLONG
+        CASE "err": retN v, lastErrorCode, varTypeINTEGER
+        CASE "_inclerrorline": retN v, 0, varTypeLONG
+        CASE "_inclerrorfile$": retS v, ""
+
+        'files
+        CASE "_fileexists": retN v, _FILEEXISTS(argS(a(), na, 1)), varTypeINTEGER
+        CASE "_direxists": retN v, _DIREXISTS(argS(a(), na, 1)), varTypeINTEGER
+        CASE "_cwd$": retS v, _CWD$
+        CASE "_startdir$": retS v, _STARTDIR$
+        CASE "_dir$": retS v, _DIR$(argS(a(), na, 1))
+        CASE "freefile": retN v, FREEFILE, varTypeINTEGER
+        CASE "eof": retN v, EOF(argN(a(), na, 1)), varTypeINTEGER
+        CASE "lof": retN v, LOF(argN(a(), na, 1)), varType_INTEGER64
+        CASE "loc": retN v, LOC(argN(a(), na, 1)), varType_INTEGER64
+        CASE "seek": retN v, SEEK(argN(a(), na, 1)), varType_INTEGER64
+        CASE "_acceptfiledrop": retN v, _ACCEPTFILEDROP, varTypeLONG
+        CASE "_totaldroppedfiles": retN v, _TOTALDROPPEDFILES, varTypeLONG
+        CASE "_droppedfile", "_droppedfile$": retS v, _DROPPEDFILE$
+
+        'sound
+        CASE "_sndrate": retN v, _SNDRATE, varTypeLONG
+        CASE "_sndopenraw": retN v, _SNDOPENRAW, varTypeLONG
+        CASE "_sndrawlen": retN v, _SNDRAWLEN, varTypeDOUBLE
+        CASE "_sndopen": retN v, _SNDOPEN(argS(a(), na, 1)), varTypeLONG
+        CASE "_sndlen": retN v, _SNDLEN(argN(a(), na, 1)), varTypeSINGLE
+        CASE "_sndpaused": retN v, _SNDPAUSED(argN(a(), na, 1)), varTypeLONG
+        CASE "_sndgetpos": retN v, _SNDGETPOS(argN(a(), na, 1)), varTypeDOUBLE
+        CASE "_sndplaying": retN v, _SNDPLAYING(argN(a(), na, 1)), varTypeLONG
+        CASE "_sndcopy": retN v, _SNDCOPY(argN(a(), na, 1)), varTypeLONG
+
+        'network
+        CASE "_openhost": retN v, _OPENHOST(argS(a(), na, 1)), varTypeLONG
+        CASE "_openclient": retN v, _OPENCLIENT(argS(a(), na, 1)), varTypeLONG
+        CASE "_openconnection": retN v, _OPENCONNECTION(argN(a(), na, 1)), varTypeLONG
+        CASE "_connected": retN v, _CONNECTED(argN(a(), na, 1)), varTypeLONG
+        CASE "_connectionaddress", "_connectionaddress$": retS v, _CONNECTIONADDRESS$(argN(a(), na, 1))
+
+        CASE ELSE
+            'known name but not available as a function (statement or arrays)
+            evalErr = 5
+    END SELECT
+END SUB

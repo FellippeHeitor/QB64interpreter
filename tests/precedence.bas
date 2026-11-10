@@ -1,0 +1,12 @@
+PRINT 8 / 4 * 2
+PRINT 10 - 2 + 3
+a = -5
+PRINT a
+PRINT 3 * -2
+PRINT 2 ^ 3 ^ 2
+PRINT 2 + 3 * 4
+PRINT (2 + 3) * 4
+PRINT 7 \ 2
+PRINT 7 MOD 3
+PRINT 1E-2 * 100
+PRINT -2 ^ 2
