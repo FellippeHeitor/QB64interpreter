@@ -2,7 +2,8 @@
 # Runs every tests/*.bas through the interpreter in headless mode and compares
 # its output with tests/<name>.expected. A tests/<name>.in file, if present,
 # is fed to the program as keyboard input. tests/*.script files are typed at
-# the interpreter's prompt instead.
+# the interpreter's prompt instead; {name} in a script line sends a key
+# ({esc}, {up}, {left}, {ctrl+z}...), at the prompt and in the editor.
 #
 # usage: tests/run.sh [path/to/basiccmdline]
 cd "$(dirname "$0")" || exit 1

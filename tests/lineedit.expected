@@ -1,0 +1,17 @@
+.PRINT "esc cleared the line"
+esc cleared the line
+.PRINT 1 + 1
+ 2 
+.PRINT "esc cleared the line"
+esc cleared the line
+.PRINT "esc cleared the line2
+esc cleared the line2
+.PRINT "abc"; "!"
+abc!
+.?"x"
+x
+.
+.PRINT "partial"
+partial
+.PRINT "ctrl+c cleared too"
+ctrl+c cleared too

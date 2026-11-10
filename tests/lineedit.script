@@ -1,0 +1,9 @@
+garbage{esc}PRINT "esc cleared the line"
+PRINT 1 + 1
+{up}{up}
+{up}{bksp}2
+PRINT "ac"{left}{left}b{end}; "!"
+PRINT "xyz"{home}{del}{del}{del}{del}{del}{del}?{end}{left}{bksp}{bksp}
+{up}{up}{down}{down}
+PRINT "partial{up}{down}"
+x = 5{ctrl+c}PRINT "ctrl+c cleared too"

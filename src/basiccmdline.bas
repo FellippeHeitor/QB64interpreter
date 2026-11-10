@@ -23,6 +23,8 @@ DIM SHARED currentLine AS LONG, lineThatErrored AS LONG
 DIM SHARED errorHappened AS _BYTE, lastErrorCode AS INTEGER, runtimeErr AS INTEGER
 DIM SHARED keyhit AS LONG, screenKeyStatus AS _BYTE
 DIM SHARED running AS _BYTE, loaded AS _BYTE, loadedFile$
+REDIM SHARED hist(0) AS STRING 'lines typed at the prompt (Up/Down)
+DIM SHARED histN AS LONG
 DIM SHARED MyBad AS _BYTE, prevListFG AS _UNSIGNED LONG, prevListBG AS _UNSIGNED LONG
 DIM L$, L1$, temp$, saveFile$, k$, i AS LONG, j AS LONG
 DIM q AS STRING * 1
@@ -144,13 +146,11 @@ END IF
 '---------------------------------------------------------------- the prompt
 DO
     IF scriptMode THEN
-        scriptPos = scriptPos + 1
-        IF scriptPos > UBOUND(scriptLines) THEN SYSTEM
-        L1$ = scriptLines(scriptPos)
-        PRINT "."; L1$
+        IF scriptPos >= UBOUND(scriptLines) THEN SYSTEM
+        L1$ = readLine$(".", true) 'types the next script line, {keys} included
     ELSE
         _AUTODISPLAY
-        LINE INPUT "."; L1$
+        L1$ = readLine$(".", true)
     END IF
     L1$ = _TRIM$(L1$)
     L$ = UCASE$(L1$)
@@ -212,7 +212,7 @@ DO
                 IF NOT loaded THEN
                     PRINT "No program loaded."
                 ELSEIF saveFile$ <> loadedFile$ AND _FILEEXISTS(saveFile$) THEN
-                    INPUT "Overwrite (y/N)?", q
+                    q = readLine$("Overwrite (y/N)? ", false)
                     IF LCASE$(q) = "y" THEN saveProgram saveFile$
                 ELSE
                     saveProgram saveFile$
@@ -624,3 +624,4 @@ END FUNCTION
 '$include:'exec.bm'
 '$include:'stmts.bm'
 '$include:'editor.bm'
+'$include:'lineedit.bm'

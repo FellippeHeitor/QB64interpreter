@@ -1,0 +1,155 @@
+'Line input for the prompt and for INPUT / LINE INPUT, replacing QB64's
+'LINE INPUT, which types Esc into the line and can't move the cursor.
+'
+'Keys: Left/Right, Home/End, Backspace, Del, Esc (clears the line),
+'Ctrl+V (paste), Up/Down (earlier lines, when useHistory is set).
+'Works on text and graphics screens; on graphics screens the background
+'under the line is kept and put back each time the line is redrawn.
+
+FUNCTION readLine$ (p$, useHistory AS _BYTE)
+    DIM t$, k$, cur AS LONG, i AS LONG, n AS LONG
+    DIM sr AS LONG, sc AS LONG, cols AS LONG, rows AS LONG, fw AS LONG, fh AS LONG
+    DIM gfx AS _BYTE, snap AS LONG, oldLen AS LONG, need AS LONG, ofs AS LONG
+    DIM histPos AS LONG, draft$, done AS _BYTE, showCursor AS _BYTE
+
+    IF scriptMode THEN 'keys come from the next script line; nothing is drawn
+        scriptPos = scriptPos + 1
+        edKeyQ$ = scriptLines(scriptPos)
+    ELSEIF _FONTWIDTH = 0 THEN 'variable-width font: fall back to QB64's own
+        PRINT p$;
+        LINE INPUT t$
+        DO WHILE INSTR(t$, CHR$(27)): t$ = LEFT$(t$, INSTR(t$, CHR$(27)) - 1) + MID$(t$, INSTR(t$, CHR$(27)) + 1): LOOP
+        readLine$ = t$
+        EXIT FUNCTION
+    END IF
+
+    IF scriptMode THEN
+        done = 0
+    ELSE
+    gfx = _PIXELSIZE <> 0
+    fw = _FONTWIDTH: fh = _FONTHEIGHT
+    IF gfx THEN cols = _WIDTH \ fw: rows = _HEIGHT \ fh ELSE cols = _WIDTH: rows = _HEIGHT
+    sr = CSRLIN: sc = POS(0)
+    IF gfx THEN snap = _COPYIMAGE(_DEST)
+    END IF
+    cur = 1
+    histPos = histN + 1
+    showCursor = -1
+
+    DO
+        IF scriptMode THEN
+            k$ = scriptKey$
+        ELSE
+            GOSUB drawLine
+            IF done THEN EXIT DO
+            DO
+                k$ = INKEY$
+                IF LEN(k$) THEN EXIT DO
+                _LIMIT 60
+            LOOP
+        END IF
+        SELECT CASE k$
+            CASE CHR$(13)
+                done = -1: showCursor = 0
+                IF scriptMode THEN EXIT DO
+            CASE CHR$(27), CHR$(3) 'Esc / Ctrl+C clear the line
+                t$ = "": cur = 1: histPos = histN + 1
+            CASE CHR$(8)
+                IF cur > 1 THEN t$ = LEFT$(t$, cur - 2) + MID$(t$, cur): cur = cur - 1
+            CASE CHR$(0) + CHR$(83) 'Del
+                t$ = LEFT$(t$, cur - 1) + MID$(t$, cur + 1)
+            CASE CHR$(0) + CHR$(75): IF cur > 1 THEN cur = cur - 1
+            CASE CHR$(0) + CHR$(77): IF cur <= LEN(t$) THEN cur = cur + 1
+            CASE CHR$(0) + CHR$(71): cur = 1
+            CASE CHR$(0) + CHR$(79): cur = LEN(t$) + 1
+            CASE CHR$(0) + CHR$(72) 'Up: earlier line
+                IF useHistory AND histPos > 1 THEN
+                    IF histPos = histN + 1 THEN draft$ = t$
+                    histPos = histPos - 1: t$ = hist(histPos): cur = LEN(t$) + 1
+                END IF
+            CASE CHR$(0) + CHR$(80) 'Down: later line
+                IF useHistory AND histPos <= histN THEN
+                    histPos = histPos + 1
+                    IF histPos > histN THEN t$ = draft$ ELSE t$ = hist(histPos)
+                    cur = LEN(t$) + 1
+                END IF
+            CASE CHR$(22) 'Ctrl+V: the first line of the clipboard
+                k$ = edGetClip$
+                i = INSTR(k$, CHR$(13)): IF i THEN k$ = LEFT$(k$, i - 1)
+                i = INSTR(k$, CHR$(10)): IF i THEN k$ = LEFT$(k$, i - 1)
+                t$ = LEFT$(t$, cur - 1) + k$ + MID$(t$, cur): cur = cur + LEN(k$)
+            CASE ELSE
+                IF LEN(k$) = 1 AND ASC(k$) >= 32 THEN
+                    t$ = LEFT$(t$, cur - 1) + k$ + MID$(t$, cur): cur = cur + 1
+                END IF
+        END SELECT
+    LOOP
+
+    IF scriptMode THEN
+        PRINT p$; t$ 'echo what was typed
+    ELSE
+        'leave the cursor after the text and move to the next line
+        ofs = sc - 1 + LEN(p$) + LEN(t$)
+        LOCATE sr + ofs \ cols, ofs MOD cols + 1
+        PRINT
+        IF gfx THEN _FREEIMAGE snap
+        _AUTODISPLAY
+    END IF
+    IF useHistory AND LEN(t$) > 0 THEN
+        IF histN = 0 THEN
+            n = 1
+        ELSEIF hist(histN) <> t$ THEN
+            n = 1
+        END IF
+        IF n THEN
+            IF histN >= 200 THEN
+                FOR i = 2 TO histN: hist(i - 1) = hist(i): NEXT
+                histN = histN - 1
+            END IF
+            histN = histN + 1
+            IF histN > UBOUND(hist) THEN REDIM _PRESERVE hist(histN + 50) AS STRING
+            hist(histN) = t$
+        END IF
+    END IF
+    readLine$ = t$
+    EXIT FUNCTION
+
+    drawLine:
+    IF scriptMode THEN RETURN
+    'room for the prompt, the text and the cursor; scroll up if needed
+    need = (sc - 1 + LEN(p$) + LEN(t$)) \ cols + 1
+    IF gfx THEN _PUTIMAGE , snap
+    n = sr + need - 1 - rows
+    IF n > 0 AND sr - n >= 1 THEN
+        LOCATE rows, 1
+        FOR i = 1 TO n: PRINT: NEXT
+        sr = sr - n
+        IF gfx THEN _FREEIMAGE snap: snap = _COPYIMAGE(_DEST)
+    END IF
+    LOCATE sr, sc
+    PRINT p$; t$;
+    IF NOT gfx AND oldLen > LEN(t$) THEN PRINT SPACE$(oldLen - LEN(t$));
+    oldLen = LEN(t$)
+    ofs = sc - 1 + LEN(p$) + cur - 1
+    IF gfx THEN
+        IF showCursor THEN LINE ((ofs MOD cols) * fw, (sr - 1 + ofs \ cols) * fh)-STEP(1, fh - 1), _DEFAULTCOLOR, BF
+        _DISPLAY
+    ELSE
+        IF sr + ofs \ cols <= rows THEN LOCATE sr + ofs \ cols, ofs MOD cols + 1, ABS(showCursor)
+    END IF
+    RETURN
+END FUNCTION
+
+FUNCTION scriptKey$
+    'the next key of the current script line in INKEY$ form; Enter at its end
+    DIM k AS LONG
+    IF edKeyQ$ = "" THEN scriptKey$ = CHR$(13): EXIT FUNCTION
+    k = edScriptKey&
+    IF k >= 256 THEN
+        scriptKey$ = CHR$(0) + CHR$(k \ 256)
+    ELSEIF edCtrl AND k >= 97 AND k <= 122 THEN
+        scriptKey$ = CHR$(k - 96)
+    ELSE
+        scriptKey$ = CHR$(k)
+    END IF
+END FUNCTION

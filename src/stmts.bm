@@ -149,9 +149,15 @@ SUB doInput (argText$, lineMode AS _BYTE)
     IF lineMode AND lv(1).t <> varTypeSTRING THEN throwError 13: EXIT SUB
 
     DO
-        PRINT prompt$;
-        IF qmark THEN PRINT "? ";
-        LINE INPUT answer$
+        IF headless THEN
+            PRINT prompt$;
+            IF qmark THEN PRINT "? ";
+            LINE INPUT answer$
+        ELSEIF qmark THEN
+            answer$ = readLine$(prompt$ + "? ", false)
+        ELSE
+            answer$ = readLine$(prompt$, false)
+        END IF
         IF lineMode THEN setLVText lv(1), answer$: EXIT SUB
 
         ok = (splitArgs(answer$, values$()) = n) OR (n = 1)
