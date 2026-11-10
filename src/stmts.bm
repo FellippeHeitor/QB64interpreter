@@ -128,7 +128,12 @@ SUB doInput (argText$, lineMode AS _BYTE)
         IF LEFT$(t$, 1) = "," THEN
             qmark = false
         ELSEIF LEFT$(t$, 1) <> ";" THEN
-            throwError 2: EXIT SUB
+            IF lineMode THEN
+                throwErrorMsg "Expected ; after the LINE INPUT prompt"
+            ELSE
+                throwErrorMsg "Expected ; or , after the INPUT prompt"
+            END IF
+            EXIT SUB
         END IF
         t$ = _TRIM$(MID$(t$, 2))
     END IF
