@@ -22,8 +22,7 @@ EDIT
 LIST
 EDIT
 {ctrl+a}{del}FOR i = 1 TO 2{enter}PRINT 10 / (i - 2){enter}NEXT{f5}
-EDIT
-{esc}
+{space}{esc}
 EDIT
 {end}*{esc}
 LIST

@@ -19,7 +19,7 @@ FUNCTION edRun%
     IF loadedFile$ = edLastFile$ AND edLastCY <= edN THEN
         edCY = edLastCY: edCX = edLastCX: edTop = edLastTop
     END IF
-    edSelOn = 0: edQuit = 0: edMsg$ = "": edErrLine = 0: edKeyQ$ = ""
+    edSelOn = 0: edQuit = 0: edMsg$ = "": edErrLine = 0
     edLastKind = -1: edEdited = 0: edMouseDown = 0: edScriptEnd = 0: edTypedLine = 0
     'undo history survives closing the editor, unless the program was
     'changed (or replaced) at the prompt in the meantime

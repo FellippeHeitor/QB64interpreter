@@ -3,6 +3,7 @@ a = 1{enter}b = 2{enter}c = 3{enter}PRINT a + b + c{alt+s}g2{enter}{end} + 10{es
 LIST
 EDIT
 {f10}{left}{left}{enter}
+{space}{esc}
 EDIT
 {alt+e}a{alt+e}t{alt+e}u{esc}
 LIST

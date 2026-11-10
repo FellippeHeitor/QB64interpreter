@@ -327,8 +327,28 @@ SUB newProgram (f$)
 END SUB
 
 SUB editProgram
-    'opens the full-screen editor (editor.bm); F5 there runs the program
-    IF edRun% = 2 THEN runProgram
+    'opens the full-screen editor (editor.bm). F5 there runs the program;
+    'when it ends, a key brings the editor back, as in QBasic
+    DO
+        IF edRun% <> 2 THEN EXIT DO
+        runProgram
+        pressAnyKey
+    LOOP
+END SUB
+
+SUB pressAnyKey
+    DIM k AS LONG
+    IF NOT headless THEN _DEST 0: _SOURCE 0 'the visible screen, even if the program drew elsewhere
+    IF POS(0) > 1 THEN PRINT
+    PRINT "Press any key to continue"
+    IF scriptMode THEN k = edGetKey&: EXIT SUB 'the key comes from the script
+    _AUTODISPLAY
+    _KEYCLEAR
+    DO
+        k = _KEYHIT
+        _LIMIT 30
+    LOOP UNTIL k > 0 AND k < 100000 'any key, but not a modifier on its own
+    _KEYCLEAR
 END SUB
 
 SUB setSoftKeys (enable AS _BYTE)
