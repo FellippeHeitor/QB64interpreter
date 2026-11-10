@@ -1,0 +1,3 @@
+PRINT "never"
+DO
+PRINT 1

@@ -1,0 +1,229 @@
+'blocks.bm - program structure table
+'
+'buildBlocks scans the program once (on RUN), splits every line into
+'statements and links each block statement to its partners:
+'DO<->LOOP, FOR<->NEXT, IF->ELSEIF->ELSE->END IF, plus a label table.
+'At run time, loops, EXIT, ELSE skipping and GOTO jump straight to the
+'linked statement instead of searching the program.
+
+FUNCTION nextStmtSep& (text$, start AS LONG)
+    'position of the next ":" that separates statements, or 0.
+    'Colons inside quotes or after a comment (') don't count.
+    DIM i AS LONG, c AS INTEGER, quote AS _BYTE
+    FOR i = start TO LEN(text$)
+        c = ASC(text$, i)
+        IF c = 34 THEN
+            quote = NOT quote
+        ELSEIF quote = 0 THEN
+            IF c = 58 THEN nextStmtSep& = i: EXIT FUNCTION
+            IF c = 39 THEN EXIT FUNCTION
+        END IF
+    NEXT
+END FUNCTION
+
+FUNCTION buildBlocks%%
+    DIM ln AS LONG, p AS LONG, sep AS LONG, t$, s$, u$, w$
+    DIM first AS _BYTE, k AS LONG, i AS LONG, f AS LONG, kind AS _BYTE
+    DIM sp AS LONG, b AS LONG, n AS LONG, msg$, errLine AS LONG
+    DIM stack(1 TO 1000) AS LONG, lastBr(1 TO 1000) AS LONG
+    REDIM nextNames$(0)
+
+    stmtCount = 0
+    labelCount = 0
+    REDIM lineFirst(UBOUND(program)) AS LONG, lineCnt(UBOUND(program)) AS LONG
+    REDIM stmts(100) AS stmtType
+
+    FOR ln = 1 TO UBOUND(program)
+        t$ = program(ln)
+        lineFirst(ln) = stmtCount + 1
+        p = 1
+        first = true
+        DO
+            DO WHILE p <= LEN(t$)
+                IF ASC(t$, p) <> 32 AND ASC(t$, p) <> 9 THEN EXIT DO
+                p = p + 1
+            LOOP
+            IF p > LEN(t$) THEN EXIT DO
+
+            sep = nextStmtSep(t$, p)
+            IF sep THEN s$ = MID$(t$, p, sep - p) ELSE s$ = MID$(t$, p)
+            u$ = UCASE$(_TRIM$(s$))
+
+            IF first THEN
+                first = false
+                'line number label: "10 PRINT x"
+                k = INSTR(u$ + " ", " ")
+                w$ = LEFT$(u$, k - 1)
+                IF isNumber(w$) THEN
+                    addLabel w$, ln
+                    p = p + INSTR(s$, w$) + LEN(w$) - 1
+                    _CONTINUE
+                END IF
+                'text label: "start:"
+                IF sep > 0 AND INSTR(u$, " ") = 0 AND LEN(u$) > 0 THEN addLabel u$, ln
+            END IF
+
+            IF LEFT$(u$, 1) = "'" OR LEFT$(u$, 4) = "REM " OR u$ = "REM" THEN EXIT DO
+            IF LEFT$(u$, 3) = "IF " AND RIGHT$(u$, 5) <> " THEN" THEN
+                'single-line IF: the rest of the line belongs to it
+                u$ = UCASE$(_TRIM$(MID$(t$, p)))
+                sep = 0
+            END IF
+
+            stmtCount = stmtCount + 1
+            IF stmtCount > UBOUND(stmts) THEN REDIM _PRESERVE stmts(stmtCount + 100) AS stmtType
+            i = stmtCount
+            stmts(i).lineNo = ln
+            stmts(i).pos = p
+            stmts(i).match = 0: stmts(i).nextBranch = 0: stmts(i).endIdx = 0
+            stmts(i).nVars = 0: stmts(i).hasCond = false
+
+            'innermost enclosing DO and FOR
+            stmts(i).encDo = 0: stmts(i).encFor = 0
+            FOR k = sp TO 1 STEP -1
+                IF stmts(stack(k)).kind = stDO AND stmts(i).encDo = 0 THEN stmts(i).encDo = stack(k)
+                IF stmts(stack(k)).kind = stFOR AND stmts(i).encFor = 0 THEN stmts(i).encFor = stack(k)
+            NEXT
+
+            kind = stOTHER
+            IF u$ = "DO" OR LEFT$(u$, 3) = "DO " THEN kind = stDO
+            IF u$ = "LOOP" OR LEFT$(u$, 5) = "LOOP " THEN kind = stLOOP
+            IF LEFT$(u$, 4) = "FOR " THEN kind = stFOR
+            IF u$ = "NEXT" OR LEFT$(u$, 5) = "NEXT " THEN kind = stNEXT
+            IF LEFT$(u$, 3) = "IF " AND RIGHT$(u$, 5) = " THEN" THEN kind = stIF
+            IF LEFT$(u$, 7) = "ELSEIF " THEN kind = stELSEIF
+            IF u$ = "ELSE" OR LEFT$(u$, 5) = "ELSE " THEN kind = stELSE
+            IF u$ = "END IF" OR u$ = "ENDIF" THEN kind = stENDIF
+            stmts(i).kind = kind
+
+            SELECT CASE kind
+                CASE stDO, stFOR, stIF
+                    IF sp = UBOUND(stack) THEN msg$ = "Blocks nested too deeply": errLine = ln: GOTO buildFailed
+                    sp = sp + 1
+                    stack(sp) = i
+                    lastBr(sp) = i
+                    IF kind = stDO THEN stmts(i).hasCond = (u$ <> "DO")
+                CASE stLOOP
+                    stmts(i).hasCond = (u$ <> "LOOP")
+                    IF sp = 0 THEN msg$ = "LOOP without DO": errLine = ln: GOTO buildFailed
+                    IF stmts(stack(sp)).kind <> stDO THEN msg$ = "LOOP without DO": errLine = ln: GOTO buildFailed
+                    IF stmts(i).hasCond AND stmts(stack(sp)).hasCond THEN
+                        msg$ = "DO and LOOP can't both have a condition": errLine = ln: GOTO buildFailed
+                    END IF
+                    stmts(i).match = stack(sp)
+                    stmts(stack(sp)).match = i
+                    sp = sp - 1
+                CASE stNEXT
+                    IF u$ = "NEXT" THEN
+                        n = 1
+                        REDIM nextNames$(1 TO 1)
+                    ELSE
+                        n = splitArgs(MID$(u$, 6), nextNames$())
+                    END IF
+                    stmts(i).nVars = n
+                    FOR k = 1 TO n
+                        IF sp = 0 THEN msg$ = "NEXT without FOR": errLine = ln: GOTO buildFailed
+                        f = stack(sp)
+                        IF stmts(f).kind <> stFOR THEN msg$ = "NEXT without FOR": errLine = ln: GOTO buildFailed
+                        IF u$ <> "NEXT" THEN
+                            IF nextNames$(k) <> forVarName$(f) THEN msg$ = "NEXT variable doesn't match FOR": errLine = ln: GOTO buildFailed
+                        END IF
+                        stmts(f).match = i
+                        IF k = 1 THEN stmts(i).match = f
+                        sp = sp - 1
+                    NEXT
+                CASE stELSEIF, stELSE
+                    IF sp = 0 THEN msg$ = "ELSE without IF": errLine = ln: GOTO buildFailed
+                    IF stmts(stack(sp)).kind <> stIF THEN msg$ = "ELSE without IF": errLine = ln: GOTO buildFailed
+                    IF stmts(lastBr(sp)).kind = stELSE THEN msg$ = "ELSE must be the last branch of IF": errLine = ln: GOTO buildFailed
+                    IF kind = stELSEIF AND RIGHT$(u$, 5) <> " THEN" THEN msg$ = "Expected ELSEIF condition THEN": errLine = ln: GOTO buildFailed
+                    stmts(lastBr(sp)).nextBranch = i
+                    lastBr(sp) = i
+                CASE stENDIF
+                    IF sp = 0 THEN msg$ = "END IF without block IF": errLine = ln: GOTO buildFailed
+                    IF stmts(stack(sp)).kind <> stIF THEN msg$ = "END IF without block IF": errLine = ln: GOTO buildFailed
+                    stmts(lastBr(sp)).nextBranch = i
+                    b = stack(sp)
+                    DO WHILE b <> i
+                        stmts(b).endIdx = i
+                        b = stmts(b).nextBranch
+                    LOOP
+                    stmts(i).match = stack(sp)
+                    sp = sp - 1
+            END SELECT
+
+            IF sep = 0 THEN EXIT DO
+            p = sep + 1
+        LOOP
+        lineCnt(ln) = stmtCount - lineFirst(ln) + 1
+    NEXT
+
+    IF sp > 0 THEN
+        SELECT CASE stmts(stack(sp)).kind
+            CASE stDO: msg$ = "DO without LOOP"
+            CASE stFOR: msg$ = "FOR without NEXT"
+            CASE stIF: msg$ = "IF without END IF"
+        END SELECT
+        errLine = stmts(stack(sp)).lineNo
+        GOTO buildFailed
+    END IF
+
+    REDIM forVar(stmtCount) AS LONG, forFinal(stmtCount) AS _FLOAT, forStep(stmtCount) AS _FLOAT
+    buildBlocks%% = true
+    EXIT FUNCTION
+
+    buildFailed:
+    PRINT msg$; " on line"; errLine
+    lineThatErrored = errLine
+END FUNCTION
+
+SUB addLabel (name$, ln AS LONG)
+    labelCount = labelCount + 1
+    IF labelCount > UBOUND(labelName) THEN
+        REDIM _PRESERVE labelName(labelCount + 50) AS STRING
+        REDIM _PRESERVE labelLine(labelCount + 50) AS LONG
+    END IF
+    labelName(labelCount) = UCASE$(name$)
+    labelLine(labelCount) = ln
+END SUB
+
+FUNCTION findLabel& (name$)
+    DIM i AS LONG, n$
+    n$ = UCASE$(_TRIM$(name$))
+    FOR i = 1 TO labelCount
+        IF labelName(i) = n$ THEN findLabel& = labelLine(i): EXIT FUNCTION
+    NEXT
+END FUNCTION
+
+FUNCTION stmtAt& (ln AS LONG, p AS LONG)
+    'the statement on line ln that contains position p
+    DIM i AS LONG, best AS LONG
+    IF ln < 1 OR ln > UBOUND(lineCnt) THEN EXIT FUNCTION
+    IF lineCnt(ln) = 0 THEN EXIT FUNCTION
+    best = lineFirst(ln)
+    FOR i = lineFirst(ln) TO lineFirst(ln) + lineCnt(ln) - 1
+        IF stmts(i).pos <= p THEN best = i
+    NEXT
+    stmtAt& = best
+END FUNCTION
+
+FUNCTION stmtText$ (i AS LONG)
+    'source text from the start of statement i to the end of its line
+    stmtText$ = MID$(program(stmts(i).lineNo), stmts(i).pos)
+END FUNCTION
+
+FUNCTION forVarName$ (f AS LONG)
+    DIM u$, e AS LONG
+    u$ = UCASE$(stmtText$(f))
+    e = INSTR(u$, "=")
+    IF e THEN forVarName$ = _TRIM$(MID$(u$, 5, e - 5))
+END FUNCTION
+
+FUNCTION forDone%% (f AS LONG)
+    'true when the loop variable of FOR statement f is past its limit
+    IF forStep(f) < 0 THEN
+        forDone%% = (nums(forVar(f)) < forFinal(f))
+    ELSE
+        forDone%% = (nums(forVar(f)) > forFinal(f))
+    END IF
+END FUNCTION

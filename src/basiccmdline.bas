@@ -44,26 +44,6 @@ TYPE vartype
     nextHash AS LONG
 END TYPE
 
-TYPE levelControlType
-    firstLine AS LONG
-    continueAt AS LONG
-    lastLine AS LONG
-    condition AS _BYTE
-    'For DO/LOOP blocks:
-    '    0 = no condition; 1 = DO + condition; 2 = LOOP + condition
-    stmtPos AS LONG 'where the DO statement starts in its line (1 = line start)
-END TYPE
-
-TYPE forControlType
-    varName AS STRING
-    varIndex AS LONG
-    initial AS _FLOAT
-    final AS _FLOAT
-    theStep AS _FLOAT
-    level AS levelControlType
-    firstRun AS _BYTE
-END TYPE
-
 CONST varType_FLOAT = 0
 CONST varTypeSTRING = 1
 CONST varTypeINTEGER = 2
@@ -78,6 +58,7 @@ CONST varType_ULONG = 10
 CONST varTypeLONG = 11
 
 '$include:'eval.bi'
+'$include:'blocks.bi'
 
 
 REDIM SHARED vars(0) AS vartype
@@ -89,9 +70,7 @@ DIM SHARED thisScope$, currentLine AS LONG, lineThatErrored AS LONG
 DIM varIndex AS LONG, i AS LONG, j AS LONG, l AS LONG
 DIM continuation$, Ucontinuation$, continueAt AS LONG
 DIM stmtPos AS LONG 'where the current statement starts in program(currentLine)
-DIM loopControl(100) AS levelControlType
-DIM forControl(100) AS forControlType
-DIM currentDoLevel AS INTEGER, currentIfLevel AS INTEGER, currentForLevel AS INTEGER
+DIM curStmt AS LONG, blk AS LONG, nk AS LONG, jumpIdx AS LONG, condVal AS _FLOAT
 DIM SHARED errorHappened AS _BYTE, lastErrorCode AS INTEGER, runtimeErr AS INTEGER
 DIM SHARED keyhit AS LONG, screenKeyStatus AS _BYTE
 DIM externalLimit AS INTEGER
@@ -228,7 +207,7 @@ DO
     ELSE
         'look for : separators (not in comments or single-line IFs)
         IF LEFT$(L$, 3) <> "IF " AND LEFT$(L$, 1) <> "'" AND LEFT$(L$, 4) <> "REM " THEN
-            j = Find(1, L$, ":")
+            j = nextStmtSep(L$, 1)
             IF j > 0 AND j < LEN(L$) THEN
                 continuation$ = _TRIM$(MID$(L1$, j + 1))
                 Ucontinuation$ = _TRIM$(MID$(L$, j + 1))
@@ -637,26 +616,10 @@ DO
         ELSEIF L$ = "RUN" THEN
             IF NOT running THEN
                 IF loaded THEN
-                    'start clean: no variables, no open blocks from a previous run
+                    'start clean: no variables; map out the program's blocks
                     clearVars
-                    FOR i = 0 TO UBOUND(loopControl)
-                        loopControl(i).firstLine = 0
-                        loopControl(i).lastLine = 0
-                        loopControl(i).continueAt = 0
-                        loopControl(i).condition = 0
-                        loopControl(i).stmtPos = 0
-                    NEXT
-                    FOR i = 0 TO UBOUND(forControl)
-                        forControl(i).level.firstLine = 0
-                        forControl(i).level.lastLine = 0
-                        forControl(i).level.continueAt = 0
-                        forControl(i).varIndex = 0
-                        forControl(i).varName = ""
-                    NEXT
+                    IF buildBlocks = 0 THEN GOTO Parse.Done
                     currentLine = 0
-                    currentDoLevel = 0
-                    currentIfLevel = 0
-                    currentForLevel = 0
                     externalLimit = 0
                     lineThatErrored = 0
                     lastErrorCode = 0
@@ -757,267 +720,106 @@ DO
         ELSEIF LEFT$(L$, 11) = "LINE INPUT " THEN
             doInput MID$(L1$, 12), true
         ELSEIF LEFT$(L$, 4) = "FOR " THEN
-            IF NOT running THEN
-                PRINT "Not valid in immediate mode."
-                GOTO Parse.Done
-            ELSE
-                i = Find(1, L$, "=")
-                j = Find(i + 1, L$, " TO ")
-                l = Find(j + 4, L$, " STEP ")
-                IF i = 0 OR j = 0 THEN
-                    PRINT "Expected FOR variable = lower TO upper on line"; currentLine
-                    running = false
-                    GOTO Parse.Done
-                ELSE
-                    DIM forInitial AS _FLOAT
-                    currentForLevel = currentForLevel + 1
-                    IF forControl(currentForLevel).level.firstLine <> currentLine THEN
-                        forControl(currentForLevel).level.firstLine = currentLine
-                        forControl(currentForLevel).level.continueAt = continueAt
-                        forControl(currentForLevel).level.lastLine = 0
-                        forControl(currentForLevel).varIndex = 0
-                    END IF
-
-                    forControl(currentForLevel).firstRun = true
-                    forControl(currentForLevel).varName = _TRIM$(MID$(L1$, 5, i - 5))
-                    forInitial = evalNum(MID$(L1$, i + 1, j - i - 1))
-                    IF l THEN
-                        forControl(currentForLevel).final = evalNum(MID$(L1$, j + 4, l - j - 4))
-                        forControl(currentForLevel).theStep = evalNum(MID$(L1$, l + 6))
-                    ELSE
-                        forControl(currentForLevel).final = evalNum(MID$(L1$, j + 4))
-                        forControl(currentForLevel).theStep = 1
-                    END IF
-                    IF errorHappened THEN GOTO Parse.Done
-
-                    varIndex = addVar(forControl(currentForLevel).varName)
-                    IF vars(varIndex).type = varTypeSTRING OR vars(varIndex).protected THEN throwError 13: GOTO Parse.Done
-                    forControl(currentForLevel).varIndex = varIndex
-                    nums(varIndex) = coerce(forInitial, vars(varIndex).type)
-                    'QB64 converts the limits to the loop variable's type
-                    forControl(currentForLevel).final = coerce(forControl(currentForLevel).final, vars(varIndex).type)
-                    forControl(currentForLevel).theStep = coerce(forControl(currentForLevel).theStep, vars(varIndex).type)
-                    GOTO treatAsNext
-                END IF
-            END IF
-        ELSEIF L$ = "NEXT" THEN
-            IF running THEN
-                IF currentForLevel = 0 THEN
-                    running = false
-                    PRINT "NEXT without FOR on line"; currentLine
-                    GOTO Parse.Done
-                ELSE
-                    treatAsNext:
-                    DIM forFirst AS _BYTE, forDone AS _BYTE
-                    varIndex = forControl(currentForLevel).varIndex
-                    forFirst = forControl(currentForLevel).firstRun
-
-                    IF forFirst THEN
-                        forControl(currentForLevel).firstRun = false
-                    ELSE
-                        forControl(currentForLevel).level.lastLine = currentLine
-                        nums(varIndex) = coerce(nums(varIndex) + forControl(currentForLevel).theStep, vars(varIndex).type)
-                    END IF
-
-                    IF forControl(currentForLevel).theStep < 0 THEN
-                        forDone = (nums(varIndex) < forControl(currentForLevel).final)
-                    ELSE
-                        forDone = (nums(varIndex) > forControl(currentForLevel).final)
-                    END IF
-                    IF forDone THEN
-                        'FOR whose range is empty: skip the body; loop that just
-                        'finished at NEXT: carry on after NEXT
-                        IF forFirst THEN GOTO treatAsExitFor
-                        currentForLevel = currentForLevel - 1
-                        GOTO Parse.Done
-                    END IF
-
-                    'next iteration: continue right after the FOR statement
-                    currentLine = forControl(currentForLevel).level.firstLine
-                    continuation$ = ""
-                    Ucontinuation$ = ""
-                    IF forControl(currentForLevel).level.continueAt > 0 THEN
-                        stmtPos = forControl(currentForLevel).level.continueAt
-                        L1$ = MID$(program(currentLine), stmtPos)
-                        L$ = UCASE$(L1$)
-                        GOTO redoThisLine
-                    END IF
-                END IF
-            ELSE
-                PRINT "Not valid in immediate mode."
+            IF NOT running THEN PRINT "Not valid in immediate mode.": GOTO Parse.Done
+            curStmt = stmtAt(currentLine, stmtPos)
+            IF stmts(curStmt).kind <> stFOR THEN GOTO notAfterThen
+            i = Find(1, L$, "=")
+            j = Find(i + 1, L$, " TO ")
+            l = Find(j + 4, L$, " STEP ")
+            IF i = 0 OR j = 0 THEN
+                PRINT "Expected FOR variable = lower TO upper on line"; currentLine
+                running = false
                 GOTO Parse.Done
             END IF
-        ELSEIF LEFT$(L$, 5) = "NEXT " THEN
-            IF running THEN
-                IF currentForLevel = 0 THEN
-                    running = false
-                    PRINT "NEXT without FOR on line"; currentLine
-                    GOTO Parse.Done
-                ELSE
-                    IF UCASE$(_TRIM$(MID$(L1$, 6))) <> UCASE$(forControl(currentForLevel).varName) THEN
-                        running = false
-                        PRINT "Incorrect variable after NEXT on line"; currentLine
-                        GOTO Parse.Done
-                    ELSE
-                        GOTO treatAsNext
-                    END IF
-                END IF
+            varName$ = _TRIM$(MID$(L1$, 5, i - 5))
+            IF validName(varName$) = 0 THEN GOTO syntaxerror
+            varIndex = addVar(varName$)
+            IF vars(varIndex).type = varTypeSTRING OR vars(varIndex).protected THEN throwError 13: GOTO Parse.Done
+
+            DIM forInitial AS _FLOAT
+            forInitial = evalNum(MID$(L1$, i + 1, j - i - 1))
+            IF l THEN
+                forFinal(curStmt) = evalNum(MID$(L1$, j + 4, l - j - 4))
+                forStep(curStmt) = evalNum(MID$(L1$, l + 6))
             ELSE
-                PRINT "Not valid in immediate mode."
-                GOTO Parse.Done
+                forFinal(curStmt) = evalNum(MID$(L1$, j + 4))
+                forStep(curStmt) = 1
             END IF
-        ELSEIF L$ = "EXIT FOR" THEN
-            IF running THEN
-                IF currentForLevel = 0 THEN
-                    running = false
-                    PRINT "EXIT FOR without FOR on line"; currentLine
-                    GOTO Parse.Done
-                ELSE
-                    treatAsExitFor:
-                    IF forControl(currentForLevel).level.lastLine > 0 THEN
-                        currentLine = forControl(currentForLevel).level.lastLine
-                    ELSE
-                        j = findBlockEnd(continuation$, currentLine, 2)
-                        IF j = 0 THEN PRINT "FOR without NEXT on line"; forControl(currentForLevel).level.firstLine: running = false: GOTO Parse.Done
-                        currentLine = j
-                    END IF
-                    currentForLevel = currentForLevel - 1
-                    continuation$ = ""
-                    Ucontinuation$ = ""
-                END IF
-            ELSE
-                PRINT "Not valid in immediate mode."
-                GOTO Parse.Done
+            IF errorHappened THEN GOTO Parse.Done
+
+            'QB64 converts the start, limit and step to the loop variable's type
+            nums(varIndex) = coerce(forInitial, vars(varIndex).type)
+            forFinal(curStmt) = coerce(forFinal(curStmt), vars(varIndex).type)
+            forStep(curStmt) = coerce(forStep(curStmt), vars(varIndex).type)
+            forVar(curStmt) = varIndex
+            IF forDone(curStmt) THEN
+                'empty range: skip the loop body
+                forVar(curStmt) = 0
+                jumpIdx = stmts(curStmt).match: GOTO jumpAfter
             END IF
-        ELSEIF L$ = "_CONTINUE" THEN
-            IF running THEN
+        ELSEIF L$ = "NEXT" OR LEFT$(L$, 5) = "NEXT " THEN
+            IF NOT running THEN PRINT "Not valid in immediate mode.": GOTO Parse.Done
+            curStmt = stmtAt(currentLine, stmtPos)
+            IF stmts(curStmt).kind <> stNEXT THEN GOTO notAfterThen
+            blk = stmts(curStmt).match
+            FOR nk = 1 TO stmts(curStmt).nVars 'NEXT i, j steps i, then j
+                IF forVar(blk) = 0 THEN PRINT "NEXT without FOR on line"; currentLine: running = false: GOTO Parse.Done
+                varIndex = forVar(blk)
+                nums(varIndex) = coerce(nums(varIndex) + forStep(blk), vars(varIndex).type)
+                IF forDone(blk) = 0 THEN jumpIdx = blk: GOTO jumpAfter 'next iteration
+                forVar(blk) = 0
+                blk = stmts(blk).encFor
+            NEXT
+            'loop finished: carry on after NEXT
+        ELSEIF L$ = "EXIT FOR" OR L$ = "EXIT DO" OR L$ = "_CONTINUE" THEN
+            IF NOT running THEN PRINT "Not valid in immediate mode.": GOTO Parse.Done
+            curStmt = stmtAt(currentLine, stmtPos)
+            IF L$ = "EXIT FOR" THEN
+                blk = stmts(curStmt).encFor
+                IF blk = 0 THEN PRINT "EXIT FOR without FOR on line"; currentLine: running = false: GOTO Parse.Done
+                forVar(blk) = 0
+                jumpIdx = stmts(blk).match: GOTO jumpAfter
+            ELSEIF L$ = "EXIT DO" THEN
+                blk = stmts(curStmt).encDo
+                IF blk = 0 THEN PRINT "EXIT DO without DO on line"; currentLine: running = false: GOTO Parse.Done
+                jumpIdx = stmts(blk).match: GOTO jumpAfter
             ELSE
-                PRINT "Not valid in immediate mode."
-                GOTO Parse.Done
+                '_CONTINUE: run the LOOP/NEXT of the innermost loop
+                blk = stmts(curStmt).encDo
+                IF stmts(curStmt).encFor > blk THEN blk = stmts(curStmt).encFor
+                IF blk = 0 THEN PRINT "_CONTINUE outside a loop on line"; currentLine: running = false: GOTO Parse.Done
+                jumpIdx = stmts(blk).match: GOTO jumpTo
             END IF
         ELSEIF L$ = "DO" OR LEFT$(L$, 9) = "DO UNTIL " OR LEFT$(L$, 9) = "DO WHILE " THEN
-            IF running THEN
-                currentDoLevel = currentDoLevel + 1
-                IF loopControl(currentDoLevel).firstLine <> currentLine THEN
-                    loopControl(currentDoLevel).firstLine = currentLine
-                    loopControl(currentDoLevel).lastLine = 0
-                    loopControl(currentDoLevel).continueAt = continueAt
-                END IF
-                loopControl(currentDoLevel).stmtPos = stmtPos
-                IF L$ = "DO" THEN
-                    loopControl(currentDoLevel).condition = 0
-                ELSE
-                    loopControl(currentDoLevel).condition = 1
-                    DIM doCond AS _FLOAT
-                    doCond = evalNum(MID$(L1$, 10))
-                    IF errorHappened THEN GOTO Parse.Done
-                    IF LEFT$(L$, 9) = "DO UNTIL " THEN
-                        IF doCond <> 0 THEN GOTO treatAsExitDo
-                    ELSE
-                        IF doCond = 0 THEN GOTO treatAsExitDo
-                    END IF
-                END IF
-            ELSE
-                PRINT "Not valid in immediate mode."
-                GOTO Parse.Done
-            END IF
-        ELSEIF LEFT$(L$, 5) = "GOTO " THEN
-            IF running THEN
-                DIM theLabel$
-                theLabel$ = _TRIM$(MID$(L$, 6))
-
-                IF isNumber(theLabel$) THEN theLabel$ = theLabel$ + " " ELSE theLabel$ = theLabel$ + ": "
-                'look for label
-                FOR i = 1 TO UBOUND(program)
-                    temp$ = UCASE$(_TRIM$(program(i))) + " "
-                    IF LEFT$(temp$, INSTR(temp$, " ")) = UCASE$(theLabel$) THEN
-                        currentLine = i - 1
-                        continuation$ = ""
-                        Ucontinuation$ = ""
-                        GOTO Parse.Done
-                    END IF
-                NEXT
-                PRINT "Label not found on line"; currentLine: running = false: GOTO Parse.Done
-            ELSE
-                PRINT "Not valid in immediate mode."
-                GOTO Parse.Done
+            IF NOT running THEN PRINT "Not valid in immediate mode.": GOTO Parse.Done
+            curStmt = stmtAt(currentLine, stmtPos)
+            IF stmts(curStmt).kind <> stDO THEN GOTO notAfterThen
+            IF L$ <> "DO" THEN
+                condVal = evalNum(MID$(L1$, 10))
+                IF errorHappened THEN GOTO Parse.Done
+                IF LEFT$(L$, 9) = "DO UNTIL " THEN condVal = (condVal = 0)
+                IF condVal = 0 THEN jumpIdx = stmts(curStmt).match: GOTO jumpAfter
             END IF
         ELSEIF L$ = "LOOP" OR LEFT$(L$, 11) = "LOOP UNTIL " OR LEFT$(L$, 11) = "LOOP WHILE " THEN
-            IF NOT running THEN
-                PRINT "Not valid in immediate mode."
-                GOTO Parse.Done
+            IF NOT running THEN PRINT "Not valid in immediate mode.": GOTO Parse.Done
+            curStmt = stmtAt(currentLine, stmtPos)
+            IF stmts(curStmt).kind <> stLOOP THEN GOTO notAfterThen
+            IF L$ = "LOOP" THEN
+                'back to the DO, which checks its own condition
+                jumpIdx = stmts(curStmt).match: GOTO jumpTo
             END IF
-
-            IF currentDoLevel = 0 THEN
-                'not inside a DO we know about (e.g. after GOTO): scan backwards for it
-                j = 0
-                FOR i = currentLine - 1 TO 1 STEP -1
-                    temp$ = UCASE$(_TRIM$(program(i)))
-                    IF temp$ = "LOOP" OR LEFT$(temp$, 5) = "LOOP " THEN j = j + 1
-                    IF temp$ = "DO" OR LEFT$(temp$, 3) = "DO " OR LEFT$(temp$, 3) = "DO:" THEN
-                        IF j = 0 THEN EXIT FOR
-                        j = j - 1
-                    END IF
-                NEXT
-                IF i < 1 THEN PRINT "LOOP without DO on line"; currentLine: running = false: GOTO Parse.Done
-                currentDoLevel = 1
-                loopControl(1).firstLine = i
-                loopControl(1).lastLine = currentLine
-                loopControl(1).stmtPos = 1
-                loopControl(1).condition = 0
-            END IF
-
-            IF L$ <> "LOOP" THEN
-                IF loopControl(currentDoLevel).condition = 1 THEN PRINT "LOOP UNTIL/WHILE not allowed in the same block as DO UNTIL/WHILE on line"; currentLine: running = false: GOTO Parse.Done
-                loopControl(currentDoLevel).condition = 2
-                DIM loopCond AS _FLOAT
-                loopCond = evalNum(MID$(L1$, 12))
-                IF errorHappened THEN GOTO Parse.Done
-                IF LEFT$(L$, 11) = "LOOP UNTIL " THEN loopCond = (loopCond = 0)
-                IF loopCond = 0 THEN
-                    'loop ends
-                    currentDoLevel = currentDoLevel - 1
-                    GOTO Parse.Done
-                END IF
-            END IF
-
-            'jump back to the DO statement
-            loopControl(currentDoLevel).lastLine = currentLine
-            i = loopControl(currentDoLevel).stmtPos
-            currentLine = loopControl(currentDoLevel).firstLine
-            currentDoLevel = currentDoLevel - 1
+            condVal = evalNum(MID$(L1$, 12))
+            IF errorHappened THEN GOTO Parse.Done
+            IF LEFT$(L$, 11) = "LOOP UNTIL " THEN condVal = (condVal = 0)
+            IF condVal <> 0 THEN jumpIdx = stmts(curStmt).match: GOTO jumpAfter
+            'loop finished: carry on after LOOP
+        ELSEIF LEFT$(L$, 5) = "GOTO " THEN
+            IF NOT running THEN PRINT "Not valid in immediate mode.": GOTO Parse.Done
+            i = findLabel(MID$(L$, 6))
+            IF i = 0 THEN PRINT "Label not found on line"; currentLine: running = false: GOTO Parse.Done
+            currentLine = i - 1
             continuation$ = ""
             Ucontinuation$ = ""
-            IF i > 1 THEN
-                'DO is in the middle of its line
-                stmtPos = i
-                L1$ = MID$(program(currentLine), i)
-                L$ = UCASE$(L1$)
-                GOTO redoThisLine
-            ELSE
-                currentLine = currentLine - 1
-            END IF
-        ELSEIF L$ = "EXIT DO" THEN
-            IF running THEN
-                IF currentDoLevel = 0 THEN
-                    PRINT "EXIT DO without DO on line"; currentLine: running = false: GOTO Parse.Done
-                END IF
-
-                treatAsExitDo:
-                IF loopControl(currentDoLevel).lastLine > 0 THEN
-                    currentLine = loopControl(currentDoLevel).lastLine
-                ELSE
-                    j = findBlockEnd(continuation$, currentLine, 1)
-                    IF j = 0 THEN PRINT "DO without LOOP on line"; loopControl(currentDoLevel).firstLine: running = false: GOTO Parse.Done
-                    currentLine = j
-                END IF
-                currentDoLevel = currentDoLevel - 1
-                continuation$ = ""
-                Ucontinuation$ = ""
-            ELSE
-                PRINT "Not valid in immediate mode."
-                GOTO Parse.Done
-            END IF
         ELSEIF LEFT$(L$, 7) = "SCREEN " THEN
             SCREEN evalNum(MID$(L1$, 8))
         ELSEIF LEFT$(L$, 12) = "_SCREENMOVE " THEN
@@ -1029,78 +831,55 @@ DO
                 IF LEN(arg$(1)) = 0 OR LEN(arg$(2)) = 0 THEN GOTO syntaxerror
                 _SCREENMOVE evalNum(arg$(1)), evalNum(arg$(2))
             END IF
-        ELSEIF L$ = "ELSE" OR LEFT$(L$, 7) = "ELSEIF " THEN
-            IF running THEN
-                'reached the end of the branch that ran: skip to the matching END IF
-                IF LEFT$(L$, 7) = "ELSEIF " AND RIGHT$(L$, 5) <> " THEN" THEN
-                    PRINT "Expected ELSEIF condition THEN on line"; currentLine
-                    running = false
-                    GOTO Parse.Done
-                END IF
-                j = findBlockEnd("", currentLine, 3)
-                IF j = 0 THEN PRINT "IF without END IF on line"; currentLine: running = false: GOTO Parse.Done
-                currentLine = j
-                currentIfLevel = currentIfLevel - 1
-            ELSE
-                PRINT "Not valid in immediate mode."
-            END IF
+        ELSEIF L$ = "ELSE" OR LEFT$(L$, 5) = "ELSE " OR LEFT$(L$, 7) = "ELSEIF " THEN
+            'reached the end of the branch that ran: skip to END IF
+            IF NOT running THEN PRINT "Not valid in immediate mode.": GOTO Parse.Done
+            curStmt = stmtAt(currentLine, stmtPos)
+            IF stmts(curStmt).kind <> stELSE AND stmts(curStmt).kind <> stELSEIF THEN GOTO notAfterThen
+            jumpIdx = stmts(curStmt).endIdx: GOTO jumpAfter
         ELSEIF L$ = "END IF" OR L$ = "ENDIF" THEN
-            IF running THEN
-                currentIfLevel = currentIfLevel - 1
-            ELSE
-                PRINT "Not valid in immediate mode."
-            END IF
+            IF NOT running THEN PRINT "Not valid in immediate mode."
         ELSEIF LEFT$(L$, 3) = "IF " THEN
+            DIM i$
             IF RIGHT$(L$, 5) = " THEN" THEN
                 'IF-THEN-ELSEIF-ELSE-END IF block
-                IF NOT running THEN
-                    PRINT "IF blocks are not valid in immediate mode."
-                    GOTO Parse.Done
-                END IF
-
-                DIM i$, ifCond AS _FLOAT
-
-                currentIfLevel = currentIfLevel + 1
-                db_echo "IF block, line" + STR$(currentLine)
-                db_echo "Current IF level:" + STR$(currentIfLevel)
-
-                checkBlockCondition:
-                i$ = MID$(L1$, 4, LEN(L1$) - 8)
-                ifCond = evalNum(i$)
+                IF NOT running THEN PRINT "IF blocks are not valid in immediate mode.": GOTO Parse.Done
+                curStmt = stmtAt(currentLine, stmtPos)
+                IF stmts(curStmt).kind <> stIF THEN GOTO notAfterThen
+                condVal = evalNum(MID$(L1$, 4, LEN(L1$) - 8))
                 IF errorHappened THEN GOTO Parse.Done
-
-                IF ifCond = 0 THEN 'condition is false
-                    j = currentIfLevel
+                IF condVal = 0 THEN
+                    'find the first branch that applies
+                    blk = stmts(curStmt).nextBranch
                     DO
-                        currentLine = currentLine + 1
-                        IF currentLine > UBOUND(program) THEN PRINT "IF without END IF on line"; currentLine: running = false: GOTO Parse.Done
-                        L1$ = program(currentLine)
-                        L1$ = LTRIM$(RTRIM$(L1$))
-                        L$ = UCASE$(L1$)
-                        IF LEFT$(L$, 3) = "IF " AND RIGHT$(L$, 5) = " THEN" THEN
-                            'new if level...
-                            currentIfLevel = currentIfLevel + 1
-                            _CONTINUE
-                        END IF
-                        IF L$ = "END IF" OR L$ = "ENDIF" THEN
-                            currentIfLevel = currentIfLevel - 1
-                            IF currentIfLevel = j - 1 THEN EXIT DO
-                        END IF
-                        IF LEFT$(L$, 7) = "ELSEIF " AND currentIfLevel = j THEN
-                            IF RIGHT$(L$, 5) = " THEN" THEN
-                                L$ = MID$(L$, 5)
-                                L1$ = MID$(L1$, 5)
-                                GOTO checkBlockCondition
-                            ELSE
-                                PRINT "Expected ELSEIF condition THEN on line"; currentLine: running = false: GOTO Parse.Done
-                            END IF
-                        END IF
-                        IF L$ = "ELSE" AND currentIfLevel = j THEN EXIT DO
-                        IF LEFT$(L$, 5) = "ELSE " AND currentIfLevel = j THEN
-                            L$ = MID$(L$, 6)
-                            L1$ = MID$(L1$, 6)
-                            GOTO redoThisLine
-                        END IF
+                        SELECT CASE stmts(blk).kind
+                            CASE stELSEIF
+                                currentLine = stmts(blk).lineNo 'for error messages
+                                i$ = stmtText$(blk)
+                                j = nextStmtSep(i$, 1)
+                                IF j THEN i$ = LEFT$(i$, j - 1)
+                                i$ = _TRIM$(i$)
+                                condVal = evalNum(MID$(i$, 8, LEN(i$) - 12))
+                                IF errorHappened THEN GOTO Parse.Done
+                                IF condVal <> 0 THEN jumpIdx = blk: GOTO jumpAfter
+                                blk = stmts(blk).nextBranch
+                            CASE stELSE
+                                'statements may follow ELSE on the same line
+                                i$ = stmtText$(blk)
+                                j = nextStmtSep(i$, 1)
+                                IF j THEN i$ = LEFT$(i$, j - 1)
+                                IF LEN(_TRIM$(i$)) > 4 THEN
+                                    currentLine = stmts(blk).lineNo
+                                    stmtPos = stmts(blk).pos
+                                    L1$ = _TRIM$(MID$(stmtText$(blk), 5))
+                                    L$ = UCASE$(L1$)
+                                    continuation$ = "": Ucontinuation$ = ""
+                                    GOTO redoThisLine
+                                END IF
+                                jumpIdx = blk: GOTO jumpAfter
+                            CASE ELSE 'END IF
+                                jumpIdx = blk: GOTO jumpAfter
+                        END SELECT
                     LOOP
                 END IF
             ELSE
@@ -1114,9 +893,9 @@ DO
                 END IF
 
                 i$ = MID$(LEFT$(L1$, j), 3)
-                ifCond = evalNum(i$)
+                condVal = evalNum(i$)
                 IF errorHappened THEN GOTO Parse.Done
-                IF ifCond <> 0 THEN
+                IF condVal <> 0 THEN
                     L$ = MID$(L$, j + 6)
                     L1$ = MID$(L1$, j + 6)
                     j = Find(1, L$, " ELSE ")
@@ -1172,6 +951,8 @@ DO
             L$ = L$ + " "
             IF LEN(L$) > 2 AND (RIGHT$(LEFT$(L$, INSTR(L$, " ") - 1), 1) = ":" OR isNumber(RTRIM$(L$))) THEN
                 'it's a label
+            ELSEIF running AND findLabel(RTRIM$(L$)) = currentLine THEN
+                'it's a label
             ELSE
                 syntaxerror:
                 IF LEN(L$) THEN PRINT "Syntax error";
@@ -1185,6 +966,30 @@ DO
         END IF
     END IF
 
+    GOTO Parse.Done
+
+    notAfterThen:
+    PRINT "Block statements can't follow THEN on line"; currentLine
+    running = false
+    GOTO Parse.Done
+
+    jumpTo:
+    'run statement number jumpIdx
+    currentLine = stmts(jumpIdx).lineNo
+    stmtPos = stmts(jumpIdx).pos
+    L1$ = MID$(program(currentLine), stmtPos)
+    L$ = UCASE$(L1$)
+    continuation$ = "": Ucontinuation$ = ""
+    GOTO redoThisLine
+
+    jumpAfter:
+    'carry on with the statement that follows statement number jumpIdx
+    continuation$ = "": Ucontinuation$ = ""
+    IF jumpIdx < stmtCount THEN
+        IF stmts(jumpIdx + 1).lineNo = stmts(jumpIdx).lineNo THEN jumpIdx = jumpIdx + 1: GOTO jumpTo
+    END IF
+    currentLine = stmts(jumpIdx).lineNo
+
     Parse.Done:
     IF runtimeErr THEN
         throwError runtimeErr
@@ -1197,7 +1002,6 @@ DO
         GOTO redoThisLine
     END IF
     IF externalLimit > 0 AND running THEN _LIMIT externalLimit
-    IF currentIfLevel < 0 THEN currentIfLevel = 0
 LOOP
 
 runtimeError:
@@ -1616,71 +1420,6 @@ FUNCTION validName%% (n$)
     validName%% = true
 END FUNCTION
 
-FUNCTION splitStmts& (text$, st$())
-    'splits a line into its statements (uppercased, trimmed). A single-line
-    'IF keeps the rest of the line; a comment ends it.
-    DIM i AS LONG, start AS LONG, quote AS _BYTE, n AS LONG, c AS INTEGER, s$, st0 AS LONG
-    REDIM st$(1 TO 10)
-    start = 1
-    FOR i = 1 TO LEN(text$) + 1
-        IF i <= LEN(text$) THEN c = ASC(text$, i) ELSE c = 58
-        IF c = 34 THEN quote = NOT quote
-        IF c = 58 AND quote = 0 THEN
-            s$ = UCASE$(_TRIM$(MID$(text$, start, i - start)))
-            st0 = start
-            start = i + 1
-            IF LEFT$(s$, 1) = "'" OR LEFT$(s$, 4) = "REM " OR s$ = "REM" THEN EXIT FOR
-            IF LEN(s$) THEN
-                n = n + 1
-                IF n > UBOUND(st$) THEN REDIM _PRESERVE st$(1 TO n + 10)
-                st$(n) = s$
-                IF LEFT$(s$, 3) = "IF " AND RIGHT$(s$, 5) <> " THEN" THEN
-                    st$(n) = UCASE$(_TRIM$(MID$(text$, st0)))
-                    EXIT FOR
-                END IF
-            END IF
-        END IF
-    NEXT
-    splitStmts& = n
-END FUNCTION
-
-FUNCTION findBlockEnd& (rest$, fromLine AS LONG, kind AS INTEGER)
-    'Finds the line that closes the block we're in, honoring nesting.
-    'kind: 1 = DO/LOOP, 2 = FOR/NEXT, 3 = IF/END IF.
-    'rest$ is what follows the current statement on fromLine.
-    DIM ln AS LONG, n AS LONG, i AS LONG, depth AS LONG, s$, text$, closes AS LONG, k AS LONG
-    REDIM st$(0)
-    FOR ln = fromLine TO UBOUND(program)
-        IF ln = fromLine THEN text$ = rest$ ELSE text$ = program(ln)
-        n = splitStmts(text$, st$())
-        FOR i = 1 TO n
-            s$ = st$(i)
-            closes = 0
-            SELECT CASE kind
-                CASE 1
-                    IF s$ = "DO" OR LEFT$(s$, 3) = "DO " THEN depth = depth + 1
-                    IF s$ = "LOOP" OR LEFT$(s$, 5) = "LOOP " THEN closes = 1
-                CASE 2
-                    IF LEFT$(s$, 4) = "FOR " THEN depth = depth + 1
-                    IF s$ = "NEXT" THEN closes = 1
-                    IF LEFT$(s$, 5) = "NEXT " THEN
-                        closes = 1 'NEXT i, j closes two loops
-                        FOR k = 1 TO LEN(s$)
-                            IF ASC(s$, k) = 44 THEN closes = closes + 1
-                        NEXT
-                    END IF
-                CASE 3
-                    IF LEFT$(s$, 3) = "IF " AND RIGHT$(s$, 5) = " THEN" THEN depth = depth + 1
-                    IF s$ = "END IF" OR s$ = "ENDIF" THEN closes = 1
-            END SELECT
-            IF closes THEN
-                IF depth < closes THEN findBlockEnd& = ln: EXIT FUNCTION
-                depth = depth - closes
-            END IF
-        NEXT
-    NEXT
-END FUNCTION
-
 SUB clearVars
     'removes user variables; built-in function names (protected) stay
     DIM i AS LONG
@@ -1734,4 +1473,5 @@ FUNCTION splitArgs& (text$, parts$())
 END FUNCTION
 
 '$include:'eval.bm'
+'$include:'blocks.bm'
 '$include:'qXed/qXed.bm'

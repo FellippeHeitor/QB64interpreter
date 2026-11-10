@@ -15,7 +15,7 @@ for f in *.bas; do
     n=${f%.bas}
     [ -f "$n.expected" ] || continue
     if [ -f "$n.in" ]; then input="$n.in"; else input=/dev/null; fi
-    got=$("$bin" -run "$here/$f" < "$input" 2>&1)
+    got=$(timeout 20 "$bin" -run "$here/$f" < "$input" 2>&1)
     if [ "$got" = "$(cat "$n.expected")" ]; then
         pass=$((pass + 1))
     else
