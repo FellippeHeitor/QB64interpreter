@@ -30,6 +30,7 @@ SUB runFrom (startPc AS LONG)
         IF dbgActive THEN 'debugging from the editor (debug.bm)
             SELECT CASE dbgCheck%(pc)
                 CASE 1: pc = pcNext: _CONTINUE 'a skipped line
+                CASE 3: pc = pcNext: _CONTINUE 'Set Next Line moved the arrow
                 CASE 2: running = false: EXIT DO 'stopped
             END SELECT
         END IF

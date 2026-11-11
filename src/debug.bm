@@ -12,17 +12,19 @@ SUB dbgStart (stepping AS _BYTE)
     DIM i AS LONG
     dbgActive = -1: dbgStopped = 0: dbgPaused = 0
     IF stepping THEN dbgMode = DBG_INTO ELSE dbgMode = DBG_RUN
-    dbgDepth = 0: dbgLastLine = 0: dbgLastDepth = -1: dbgExecLine = 0
+    dbgDepth = 0: dbgLastLine = 0: dbgLastDepth = -1: dbgExecLine = 0: dbgJumped = 0
     FOR i = 1 TO wCount: wHit(i) = 0: NEXT
 END SUB
 
 FUNCTION dbgCheck% (pc AS LONG)
-    'before statement pc: 0 run it, 1 skip it, 2 stop the program
+    'before statement pc: 0 run it, 1 skip it, 2 stop the program,
+    '3 go to pcNext instead (Set Next Line)
     DIM ln AS LONG, m AS INTEGER, newLine AS _BYTE, why$, i AS LONG, r AS _BYTE
 
     ln = stmts(pc).lineNo
     newLine = (ln <> dbgLastLine OR callDepth <> dbgLastDepth)
     dbgLastLine = ln: dbgLastDepth = callDepth
+    IF dbgJumped THEN dbgJumped = 0: EXIT FUNCTION 'the line just picked runs, even if marked to skip
     IF ln >= 1 AND ln <= UBOUND(edMark) THEN m = edMark(ln)
 
     'a line marked to skip doesn't run (SUB lines must, so bodies stay hidden)
@@ -34,6 +36,7 @@ FUNCTION dbgCheck% (pc AS LONG)
 
     IF newLine AND stmts(pc).kind <> stSUB THEN 'SUB lines only jump over the body
         IF m AND MARK_BREAK THEN why$ = "Breakpoint"
+        IF ln = dbgRunTo AND why$ = "" THEN why$ = " "
         SELECT CASE dbgMode
             CASE DBG_INTO: IF why$ = "" THEN why$ = " "
             CASE DBG_OVER: IF callDepth <= dbgDepth AND why$ = "" THEN why$ = " "
@@ -50,7 +53,26 @@ FUNCTION dbgCheck% (pc AS LONG)
         END IF
     NEXT
 
-    IF LEN(why$) THEN dbgCheck% = dbgPause%(ln, _TRIM$(why$))
+    IF LEN(why$) THEN
+        i = dbgPause%(ln, _TRIM$(why$))
+        IF i = 3 THEN
+            pcNext = dbgNextPc: dbgJumped = -1
+            dbgLastLine = stmts(dbgNextPc).lineNo: dbgLastDepth = callDepth
+        END IF
+        dbgCheck% = i
+    END IF
+END FUNCTION
+
+FUNCTION dbgStmtAt& (y AS LONG, proc AS LONG)
+    'the first statement on line y: -1 if it's in another SUB/FUNCTION
+    '(or is the SUB line itself), 0 if the line has nothing to run
+    DIM s AS LONG
+    FOR s = 1 TO stmtCount
+        IF stmts(s).lineNo = y THEN
+            IF stmts(s).proc <> proc OR stmts(s).kind = stSUB THEN dbgStmtAt& = -1 ELSE dbgStmtAt& = s
+            EXIT FUNCTION
+        END IF
+    NEXT
 END FUNCTION
 
 FUNCTION dbgPause% (ln AS LONG, why$)
@@ -58,7 +80,8 @@ FUNCTION dbgPause% (ln AS LONG, why$)
     DIM pDest AS LONG, pSource AS LONG, pDisplay AS LONG, pAuto AS _BYTE, i AS LONG
     DIM scrCopy AS LONG, pRow AS LONG, pCol AS LONG, pFG AS _UNSIGNED LONG, pBG AS _UNSIGNED LONG
 
-    dbgExecLine = ln: dbgPaused = -1
+    DIM s AS LONG, moved AS _BYTE
+    dbgExecLine = ln: dbgPaused = -1: dbgRunTo = 0
     IF headless THEN
         IF why$ = "" THEN PRINT "debug: paused at line"; ln ELSE PRINT "debug: paused at line"; ln; "- "; why$
         FOR i = 1 TO wCount
@@ -84,7 +107,22 @@ FUNCTION dbgPause% (ln AS LONG, why$)
         scrCopy = _COPYIMAGE(pDisplay)
         edScreenOpen scrCopy
     END IF
-    edLoop
+    DO
+        edLoop
+        IF edQuit <> ED_SETNEXT THEN EXIT DO
+        'Set Next Line: move the arrow and stay paused
+        edQuit = 0
+        s = dbgStmtAt&(dbgSetLine, stmts(pcCur).proc)
+        IF s = 0 THEN
+            edSetMsg "Line" + STR$(dbgSetLine) + " has nothing to run"
+        ELSEIF s < 0 THEN
+            edSetMsg "The next line must be in " + dbgKindName$(stmts(pcCur).proc)
+        ELSE
+            dbgNextPc = s: moved = -1
+            dbgExecLine = dbgSetLine
+            IF headless THEN PRINT "debug: next line is"; dbgSetLine
+        END IF
+    LOOP
     IF NOT headless THEN
         edScreenClose
         IF imageAlive%%(pDisplay) THEN
@@ -105,6 +143,7 @@ FUNCTION dbgPause% (ln AS LONG, why$)
         _KEYCLEAR 'keys pressed in the debugger aren't for the program
     END IF
 
+    IF moved THEN dbgPause% = 3
     SELECT CASE edQuit
         CASE ED_CONTINUE: dbgMode = DBG_RUN
         CASE ED_INTO: dbgMode = DBG_INTO
@@ -318,6 +357,7 @@ SUB dbgVarList
     DIM names$(0), idx(0) AS LONG, n AS LONG, sel AS LONG, topRow AS LONG, rows AS LONG
     DIM w AS LONG, h AS LONG, lft AS LONG, top AS LONG, e AS LONG, i AS LONG, j AS LONG, r AS LONG
     DIM b$(1 TO 5), bx(1 TO 5) AS LONG, by AS LONG, pressed AS INTEGER, done AS INTEGER, t$, cmd AS INTEGER
+    DIM dx AS LONG, dy AS LONG
 
     b$(1) = "&Watch": b$(2) = "&Set Value": b$(3) = "&Condition": b$(4) = "&Add...": b$(5) = "Close"
     sel = 1
@@ -331,7 +371,7 @@ SUB dbgVarList
         IF rows < 3 THEN rows = 3
         h = rows + 8
         lft = (edCols - w) \ 2 + 1: top = (edRows - h) \ 2 + 1
-        IF top < 1 THEN top = 1
+        edDlgPlace lft, top, w, h, dx, dy
         by = top + h - 3
         edLayoutButtons b$(), 5, lft, w, bx()
         IF sel < topRow + 1 THEN topRow = sel - 1
@@ -366,6 +406,7 @@ SUB dbgVarList
 
         IF cmd = 0 THEN
             e = edUiWait&
+            IF edDlgDrag%%(e, lft, top, w, dx, dy) THEN e = 0
             SELECT CASE e
                 CASE -1
                     pressed = 0
@@ -468,6 +509,16 @@ FUNCTION dbgValidCond%% (c$)
 END FUNCTION
 
 '---------------------------------------------------------------- call stack
+FUNCTION dbgKindName$ (p AS LONG)
+    IF p = 0 THEN
+        dbgKindName$ = "the main module"
+    ELSEIF procs(p).isFunc THEN
+        dbgKindName$ = "the same FUNCTION"
+    ELSE
+        dbgKindName$ = "the same SUB"
+    END IF
+END FUNCTION
+
 FUNCTION dbgProcName$ (p AS LONG)
     DIM t$
     IF p = 0 THEN dbgProcName$ = "main module": EXIT FUNCTION

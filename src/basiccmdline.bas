@@ -338,7 +338,7 @@ SUB editProgram
         IF r <> ED_RUN AND r <> ED_STEP THEN EXIT DO
         dbgStart (r = ED_STEP)
         runProgram
-        dbgActive = false
+        dbgActive = false: dbgRunTo = 0
         IF dbgStopped = 0 THEN pressAnyKey 'stopping from the debugger goes straight back
     LOOP
 END SUB

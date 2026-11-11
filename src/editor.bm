@@ -329,7 +329,14 @@ FUNCTION edDebugKey%% (k AS LONG)
         CASE EK_ESC: IF dbgPaused THEN edQuit = ED_STOP ELSE handled = 0
         CASE EK_F9
             IF edCtrl THEN dbgToggleMark edCY, MARK_SKIP ELSE dbgToggleMark edCY, MARK_BREAK
-        CASE EK_F10: dbgClearBreakpoints
+        CASE EK_F10
+            IF edShift THEN
+                edContextMenu edCX - edLeft + edGW, edCY - edTop + 3 'the right-click menu, at the cursor
+            ELSEIF edCtrl THEN
+                edCommand "setnext"
+            ELSE
+                dbgClearBreakpoints
+            END IF
         CASE EK_F12: dbgCallStack
         CASE ELSE
             handled = 0
@@ -1094,12 +1101,21 @@ END SUB
 
 '---------------------------------------------------------------- mouse
 FUNCTION edMouse%%
-    DIM wheel AS LONG, b AS _BYTE, changed AS _BYTE, rows AS LONG
+    DIM wheel AS LONG, b AS _BYTE, rb AS _BYTE, changed AS _BYTE, rows AS LONG
     rows = edTR
     DO WHILE _MOUSEINPUT
         wheel = wheel + _MOUSEWHEEL
         b = _MOUSEBUTTON(1)
         edMouseY = _MOUSEY \ 16 + 1: edMouseX = _MOUSEX \ 8 + 1: edMousePY = _MOUSEY
+        rb = _MOUSEBUTTON(2)
+        IF rb AND edRightPrev = 0 AND edMouseDown = 0 AND b = 0 THEN
+            edRightPrev = rb
+            IF edMouseY >= 2 AND edMouseY <= edTR + 1 AND edMouseX < edCols THEN
+                edRightClick
+                edMouse%% = -1: EXIT FUNCTION
+            END IF
+        END IF
+        edRightPrev = rb
         IF b = 0 THEN
             IF edMouseDown THEN changed = -1
             edMouseDown = 0
@@ -1174,6 +1190,20 @@ SUB edMouseClick
         edClickT = TIMER: edClickY = y: edClickX = x
     END IF
     edWantX = edCX
+END SUB
+
+SUB edRightClick
+    'right-click on the text or a line number: the cursor moves there
+    '(unless the click is inside the selection) and the menu opens
+    DIM y AS LONG, x AS LONG, sy AS LONG, sx AS LONG, ey AS LONG, ex AS LONG, inSel AS _BYTE
+    edMsg$ = ""
+    edMouseToText y, x
+    IF edMouseX <= edGW THEN x = edFirstNonSpace&(y): IF x < 1 THEN x = 1
+    IF edGetSel%(sy, sx, ey, ex) THEN
+        inSel = (y > sy OR (y = sy AND x >= sx)) AND (y < ey OR (y = ey AND x <= ex))
+    END IF
+    IF inSel = 0 THEN edSelOn = 0: edCY = y: edCX = x: edWantX = x
+    edContextMenu edMouseX, edMouseY
 END SUB
 
 SUB edGutterClick

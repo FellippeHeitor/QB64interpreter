@@ -1,0 +1,7 @@
+LOAD tests/debug_prog.bas
+EDIT
+{f8}
+{ctrl+g}3{enter}{shift+f10}n{f7}{ctrl+g}4{enter}{ctrl+f10}{ctrl+g}9{enter}{ctrl+f10}{f8}{ctrl+g}6{enter}{ctrl+f10}{f5}
+{space}{ctrl+g}4{enter}{shift+f10}r
+{ctrl+g}5{enter}{ctrl+f10}{esc}
+{ctrl+f10}{esc}

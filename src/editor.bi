@@ -10,7 +10,7 @@ CONST EK_F6 = 16384, EK_F7 = 16640, EK_F8 = 16896, EK_F9 = 17152, EK_F12 = 34304
 
 'what closed the editor (edQuit)
 CONST ED_CLOSE = 1, ED_RUN = 2, ED_STEP = 3
-CONST ED_CONTINUE = 20, ED_INTO = 21, ED_OVER = 22, ED_OUT = 23, ED_STOP = 29 'while paused
+CONST ED_CONTINUE = 20, ED_INTO = 21, ED_OVER = 22, ED_OUT = 23, ED_SETNEXT = 24, ED_STOP = 29 'while paused
 
 'debugger (debug.bm)
 CONST DBG_RUN = 0, DBG_INTO = 1, DBG_OVER = 2, DBG_OUT = 3
@@ -18,6 +18,8 @@ CONST MARK_BREAK = 1, MARK_SKIP = 2
 REDIM SHARED edMark(1 TO 1) AS _BYTE 'per line: breakpoint or skip
 DIM SHARED dbgActive AS _BYTE, dbgStopped AS _BYTE, dbgPaused AS _BYTE, dbgMode AS INTEGER
 DIM SHARED dbgDepth AS LONG, dbgLastLine AS LONG, dbgLastDepth AS LONG, dbgExecLine AS LONG
+DIM SHARED dbgSetLine AS LONG, dbgNextPc AS LONG, dbgJumped AS _BYTE 'Set Next Line
+DIM SHARED dbgRunTo AS LONG 'Run to Cursor: the line to stop at
 REDIM SHARED wName$(0), wCond$(0), wHit(0) AS _BYTE 'watch list and watchpoints
 DIM SHARED wCount AS LONG
 REDIM SHARED csProc(0) AS LONG, csLine(0) AS LONG 'call stack: procedure and calling line per depth
@@ -31,6 +33,7 @@ CONST EC_STRING = 11, EC_COMMENT = 12, EC_META = 13, EC_LABEL = 14, EC_BRIGHT = 
 CONST EC_HOTKEY = 16, EC_TRACK = 17, EC_THUMB = 18, EC_THUMBHOT = 19, EC_BUTTON = 20, EC_EXECLINE = 21, EC_BPDOT = 22
 
 CONST ED_UNDO_MAX = 300, ED_TAB = 4
+CONST ED_POPUP = 8 'menu slot for the right-click menu (not in the menu bar)
 
 REDIM SHARED edL(1 TO 1) AS STRING 'the text being edited
 DIM SHARED edN AS LONG 'number of lines
@@ -48,6 +51,8 @@ DIM SHARED edKeyQ$, edScriptEnd AS _BYTE, edClip$, edClipLine$
 DIM SHARED edPromptCancel AS _BYTE, edMouseY AS LONG, edMouseX AS LONG, edMousePY AS LONG
 DIM SHARED edMouseDown AS INTEGER '1 selecting, 2 ignore until released, 3 scroll thumb, 4 scroll repeat
 DIM SHARED edModal AS INTEGER, edUiHover AS _BYTE, edUiBlink AS _BYTE 'a menu or dialog is open
+DIM SHARED edDragOn AS _BYTE, edDragX AS LONG, edDragY AS LONG 'a dialog being moved by its title bar
+DIM SHARED edPopX AS LONG, edPopY AS LONG, edPopWord$, edRightPrev AS _BYTE 'the right-click menu
 DIM SHARED edUiFldN AS INTEGER, edUiFldX AS LONG, edUiFldY AS LONG, edUiFldW AS LONG 'a dialog's text fields, one every other row
 DIM SHARED edRepDir AS LONG, edRepT AS DOUBLE, edThumbOfs AS LONG, edUiPrevB AS _BYTE, edAltAlone AS _BYTE
 DIM SHARED edClickT AS DOUBLE, edClickY AS LONG, edClickX AS LONG

@@ -1,0 +1,15 @@
+.LOAD tests/debug_prog.bas
+Loaded.
+.EDIT
+debug: paused at line 1 
+debug: next line is 3 
+debug: paused at line 8 
+editor: The next line must be in the same SUB
+debug: next line is 9 
+debug: paused at line 4 
+debug: next line is 6 
+end 0 
+Press any key to continue
+debug: paused at line 4 
+debug: next line is 5 
+editor: Set Next Line works while the program is paused

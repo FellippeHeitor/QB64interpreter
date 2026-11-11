@@ -41,6 +41,8 @@ SUB edInitMenus
     edAddItem 5, "Step &Into" + t$ + "F7" + t$ + "into"
     edAddItem 5, "Step &Over" + t$ + "F8" + t$ + "over"
     edAddItem 5, "Step O&ut" + t$ + "F6" + t$ + "out"
+    edAddItem 5, "Set &Next Line" + t$ + "Ctrl+F10" + t$ + "setnext"
+    edAddItem 5, "&Run to Cursor" + t$ + "" + t$ + "runto"
     edAddItem 5, "-"
     edAddItem 5, "Toggle &Breakpoint" + t$ + "F9" + t$ + "bp"
     edAddItem 5, "Toggle &Skip Line" + t$ + "Ctrl+F9" + t$ + "skip"
@@ -141,7 +143,13 @@ SUB edMenuGeom (m AS INTEGER, lft AS LONG, top AS LONG, w AS LONG, h AS LONG)
         IF n > w THEN w = n
     NEXT
     h = edMenuCount(m) + 2
-    lft = edMenuX%(m) - 1: top = 2
+    IF m > edMenuN THEN 'the right-click menu opens at the pointer
+        lft = edPopX: top = edPopY
+        IF top + h - 1 > edRows THEN top = edRows - h + 1
+        IF top < 2 THEN top = 2
+    ELSE
+        lft = edMenuX%(m) - 1: top = 2
+    END IF
     IF lft + w - 1 > edCols THEN lft = edCols - w + 1
     IF lft < 1 THEN lft = 1
 END SUB
@@ -180,23 +188,29 @@ FUNCTION edMenuStep% (m AS INTEGER, sel AS INTEGER, dir AS INTEGER)
 END FUNCTION
 
 SUB edMenu (startM AS INTEGER)
-    'opens a menu; arrows, Enter, the underlined letters or the mouse choose
-    DIM m AS INTEGER, sel AS INTEGER, e AS LONG, cmd$, i AS INTEGER, t AS INTEGER
+    'opens a menu; arrows, Enter, the underlined letters or the mouse choose.
+    'startM = ED_POPUP opens the right-click menu instead of one in the bar
+    DIM popup AS _BYTE, m AS INTEGER, sel AS INTEGER, e AS LONG, cmd$, i AS INTEGER, t AS INTEGER
     DIM lft AS LONG, top AS LONG, w AS LONG, h AS LONG, k AS LONG, shownM AS INTEGER, shownSel AS INTEGER
 
     m = startM: sel = edMenuStep%(m, 0, 1)
+    popup = (m > edMenuN)
     edUiStart
     edUiHover = -1
     DO
         IF NOT headless AND (m <> shownM OR sel <> shownSel OR e = -2) THEN
-            edDraw: edDrawMenuBar m: edDrawMenu m, sel: _DISPLAY
+            edDraw
+            IF popup THEN edDrawMenuBar 0 ELSE edDrawMenuBar m
+            edDrawMenu m, sel: _DISPLAY
             shownM = m: shownSel = sel
         END IF
         e = edUiWait&
         edMenuGeom m, lft, top, w, h
         SELECT CASE e
             CASE -1, -3 'mouse press / move
-                IF edMouseY = 1 THEN
+                IF edMouseY = 1 AND popup THEN
+                    IF e = -1 THEN EXIT DO
+                ELSEIF edMouseY = 1 THEN
                     t = edMenuAt%(edMouseX)
                     IF t = m AND e = -1 THEN EXIT DO
                     IF t > 0 AND t <> m THEN m = t: sel = edMenuStep%(m, 0, 1)
@@ -211,10 +225,16 @@ SUB edMenu (startM AS INTEGER)
                     EXIT DO
                 END IF
             CASE EK_ESC, EK_MENU: EXIT DO
-            CASE EK_LEFT: m = m - 1: IF m < 1 THEN m = edMenuN
-                sel = edMenuStep%(m, 0, 1)
-            CASE EK_RIGHT: m = m + 1: IF m > edMenuN THEN m = 1
-                sel = edMenuStep%(m, 0, 1)
+            CASE EK_LEFT
+                IF popup = 0 THEN
+                    m = m - 1: IF m < 1 THEN m = edMenuN
+                    sel = edMenuStep%(m, 0, 1)
+                END IF
+            CASE EK_RIGHT
+                IF popup = 0 THEN
+                    m = m + 1: IF m > edMenuN THEN m = 1
+                    sel = edMenuStep%(m, 0, 1)
+                END IF
             CASE EK_UP: sel = edMenuStep%(m, sel, -1)
             CASE EK_DOWN: sel = edMenuStep%(m, sel, 1)
             CASE EK_HOME: sel = edMenuStep%(m, 0, 1)
@@ -222,7 +242,9 @@ SUB edMenu (startM AS INTEGER)
             CASE EK_ENTER: cmd$ = edPart$(edMenuItem$(m, sel), 3): EXIT DO
             CASE 65 TO 90, 97 TO 122
                 k = e OR 32
-                IF edAlt THEN 'Alt+letter: another menu
+                IF edAlt AND popup THEN
+                    EXIT DO
+                ELSEIF edAlt THEN 'Alt+letter: another menu
                     FOR i = 1 TO edMenuN
                         IF edHotkey%(edMenuTitle$(i)) = k THEN m = i: sel = edMenuStep%(m, 0, 1)
                     NEXT
@@ -237,6 +259,46 @@ SUB edMenu (startM AS INTEGER)
     edUiHover = 0
     edUiEnd
     IF LEN(cmd$) THEN edCommand cmd$
+END SUB
+
+SUB edContextMenu (x AS LONG, y AS LONG)
+    'the right-click menu, opened at column x, row y (Shift+F10: at the cursor)
+    DIM t$, a AS LONG, b AS LONG, w$
+    t$ = CHR$(9)
+    edMenuCount(ED_POPUP) = 0
+    IF dbgPaused THEN
+        edAddItem ED_POPUP, "Set &Next Line" + t$ + "Ctrl+F10" + t$ + "setnext"
+    END IF
+    edAddItem ED_POPUP, "&Run to Cursor" + t$ + "" + t$ + "runto"
+    edAddItem ED_POPUP, "-"
+    edAddItem ED_POPUP, "Toggle &Breakpoint" + t$ + "F9" + t$ + "bp"
+    edAddItem ED_POPUP, "Toggle &Skip Line" + t$ + "Ctrl+F9" + t$ + "skip"
+    'the name under the cursor can be watched
+    a = edCX: b = edCX
+    DO WHILE a > 1 AND edIsWordChar%%(MID$(edL(edCY), a - 1, 1)): a = a - 1: LOOP
+    DO WHILE b <= LEN(edL(edCY)) AND edIsWordChar%%(MID$(edL(edCY), b, 1)): b = b + 1: LOOP
+    IF b <= LEN(edL(edCY)) THEN IF INSTR("%&!#", MID$(edL(edCY), b, 1)) THEN b = b + 1
+    w$ = MID$(edL(edCY), a, b - a)
+    edPopWord$ = ""
+    IF LEN(w$) THEN
+        IF ASC(w$) < 48 OR ASC(w$) > 57 THEN
+            IF INSTR(edKeywords$, " " + UCASE$(w$) + " ") = 0 THEN edPopWord$ = w$
+        END IF
+    END IF
+    IF LEN(edPopWord$) THEN
+        IF dbgWatchIndex&(edPopWord$) THEN
+            edAddItem ED_POPUP, "Stop &Watching " + LEFT$(edPopWord$, 30) + t$ + "" + t$ + "watch"
+        ELSE
+            edAddItem ED_POPUP, "&Watch " + LEFT$(edPopWord$, 30) + t$ + "" + t$ + "watch"
+        END IF
+    END IF
+    edAddItem ED_POPUP, "-"
+    IF dbgPaused = 0 THEN edAddItem ED_POPUP, "Cu&t" + t$ + "Ctrl+X" + t$ + "cut"
+    edAddItem ED_POPUP, "&Copy" + t$ + "Ctrl+C" + t$ + "copy"
+    IF dbgPaused = 0 THEN edAddItem ED_POPUP, "&Paste" + t$ + "Ctrl+V" + t$ + "paste"
+    edAddItem ED_POPUP, "Select &All" + t$ + "Ctrl+A" + t$ + "selall"
+    edPopX = x: edPopY = y
+    edMenu ED_POPUP
 END SUB
 
 FUNCTION edMenuForKey% (k AS LONG)
@@ -287,6 +349,21 @@ SUB edCommand (c$)
         CASE "bp": dbgToggleMark edCY, MARK_BREAK
         CASE "skip": dbgToggleMark edCY, MARK_SKIP
         CASE "clearbp": dbgClearBreakpoints
+        CASE "setnext"
+            IF dbgPaused THEN
+                dbgSetLine = edCY: edQuit = ED_SETNEXT
+            ELSE
+                edSetMsg "Set Next Line works while the program is paused"
+            END IF
+        CASE "runto"
+            dbgRunTo = edCY
+            IF dbgPaused THEN edQuit = ED_CONTINUE ELSE edQuit = ED_RUN
+        CASE "watch"
+            IF dbgWatchIndex&(edPopWord$) THEN
+                dbgRemoveWatch dbgWatchIndex&(edPopWord$)
+            ELSE
+                IF dbgAddWatch&(edPopWord$) THEN edSetMsg "Watching " + edPopWord$
+            END IF
         CASE "vars": dbgVarList
         CASE "stack": dbgCallStack
         CASE "keys": edHelp
@@ -311,9 +388,40 @@ SUB edUiEnd
     edModal = edModal - 1
     IF headless THEN EXIT SUB
     IF edUiPrevB THEN edMouseDown = 2
+    edRightPrev = _MOUSEBUTTON(2) 'a right-click release the menu took
     edUiFldN = 0
     IF edModal > 0 THEN edUiPointer
 END SUB
+
+SUB edDlgPlace (lft AS LONG, top AS LONG, w AS LONG, h AS LONG, dx AS LONG, dy AS LONG)
+    'moves a dialog from where it would be by dx, dy (dragged by its title
+    'bar), keeping it on screen; dx, dy shrink to what fits
+    DIM x AS LONG, y AS LONG
+    x = lft + dx: y = top + dy
+    IF x + w - 1 > edCols THEN x = edCols - w + 1
+    IF x < 1 THEN x = 1
+    IF y + h - 1 > edRows THEN y = edRows - h + 1
+    IF y < 1 THEN y = 1
+    dx = x - lft: dy = y - top
+    lft = x: top = y
+END SUB
+
+FUNCTION edDlgDrag%% (e AS LONG, lft AS LONG, top AS LONG, w AS LONG, dx AS LONG, dy AS LONG)
+    'a press on a dialog's title bar starts moving it, until the button is
+    'released. Returns true when e was used for that.
+    SELECT CASE e
+        CASE -1
+            IF edMouseY = top AND edMouseX >= lft AND edMouseX < lft + w THEN
+                edDragOn = -1: edUiHover = -1
+                edDragX = edMouseX - dx: edDragY = edMouseY - dy
+                edDlgDrag%% = -1
+            END IF
+        CASE -3
+            IF edDragOn THEN dx = edMouseX - edDragX: dy = edMouseY - edDragY: edDlgDrag%% = -1
+        CASE -5
+            IF edDragOn THEN edDragOn = 0: edUiHover = 0: edDlgDrag%% = -1
+    END SELECT
+END FUNCTION
 
 SUB edUiPointer
     'I-beam over a dialog's text fields, arrow elsewhere in menus and dialogs
@@ -521,7 +629,7 @@ FUNCTION edDialog% (title$, n AS INTEGER, labels$(), vals$())
     DIM lw AS LONG, w AS LONG, h AS LONG, lft AS LONG, top AS LONG, fx AS LONG, fw AS LONG
     DIM e AS LONG, i AS INTEGER, p AS LONG, result AS INTEGER, done AS _BYTE
     DIM b$(1 TO 2), bx(1 TO 2) AS LONG, by AS LONG, pressed AS INTEGER, dragging AS INTEGER
-    DIM clickT AS DOUBLE, clickX AS LONG, clickY AS LONG
+    DIM clickT AS DOUBLE, clickX AS LONG, clickY AS LONG, dx AS LONG, dy AS LONG
 
     b$(1) = "OK": b$(2) = "Cancel"
     FOR i = 1 TO n
@@ -536,7 +644,7 @@ FUNCTION edDialog% (title$, n AS INTEGER, labels$(), vals$())
         w = lw + 36: IF w > edCols - 2 THEN w = edCols - 2
         h = 5 + 2 * n
         lft = (edCols - w) \ 2 + 1: top = (edRows - h) \ 2 + 1
-        IF top < 1 THEN top = 1
+        edDlgPlace lft, top, w, h, dx, dy
         fx = lft + 3 + lw: fw = lft + w - 3 - fx + 1
         by = top + h - 3
         edLayoutButtons b$(), 2, lft, w, bx()
@@ -560,6 +668,7 @@ FUNCTION edDialog% (title$, n AS INTEGER, labels$(), vals$())
         IF done THEN EXIT DO
 
         e = edUiWait&
+        IF edDlgDrag%%(e, lft, top, w, dx, dy) THEN e = 0
         IF e <> -4 THEN edBlinkT = TIMER 'solid while typing or clicking
         SELECT CASE e
             CASE -1 'press
@@ -629,6 +738,7 @@ FUNCTION edConfirm% (title$, msg$, buttons$, avoidRow AS LONG)
     DIM b$(1 TO 6), bx(1 TO 6) AS LONG, nb AS INTEGER, i AS INTEGER, a AS LONG, j AS LONG, focus AS INTEGER
     DIM ln$(1 TO 6), nl AS INTEGER, words$, wd$, bw AS LONG, w AS LONG, h AS LONG
     DIM lft AS LONG, top AS LONG, by AS LONG, e AS LONG, result AS LONG, pressed AS INTEGER, done AS _BYTE
+    DIM dx AS LONG, dy AS LONG
 
     a = 1
     DO
@@ -663,7 +773,7 @@ FUNCTION edConfirm% (title$, msg$, buttons$, avoidRow AS LONG)
         IF avoidRow >= top AND avoidRow < top + h THEN 'keep a found match in view
             IF avoidRow > edRows \ 2 THEN top = 2 ELSE top = edRows - h
         END IF
-        IF top < 1 THEN top = 1
+        edDlgPlace lft, top, w, h, dx, dy
         by = top + h - 3
         edLayoutButtons b$(), nb, lft, w, bx()
 
@@ -681,6 +791,7 @@ FUNCTION edConfirm% (title$, msg$, buttons$, avoidRow AS LONG)
         IF done THEN EXIT DO
 
         e = edUiWait&
+        IF edDlgDrag%%(e, lft, top, w, dx, dy) THEN e = 0
         SELECT CASE e
             CASE -1
                 pressed = 0
@@ -715,7 +826,7 @@ END FUNCTION
 
 SUB edMessage (title$, lines$(), n AS INTEGER)
     'a box of text lines; any key or click closes it
-    DIM w AS LONG, h AS LONG, lft AS LONG, top AS LONG, i AS INTEGER, e AS LONG
+    DIM w AS LONG, h AS LONG, lft AS LONG, top AS LONG, i AS INTEGER, e AS LONG, dx AS LONG, dy AS LONG
     IF headless THEN EXIT SUB
     edUiStart
     DO
@@ -726,7 +837,7 @@ SUB edMessage (title$, lines$(), n AS INTEGER)
         w = w + 6: IF w > edCols - 2 THEN w = edCols - 2
         h = n + 4: IF h > edRows THEN h = edRows
         lft = (edCols - w) \ 2 + 1: top = (edRows - h) \ 2 + 1
-        IF top < 1 THEN top = 1
+        edDlgPlace lft, top, w, h, dx, dy
         edDraw
         edBox lft, top, w, h, title$
         edColor EC_BARTEXT, EC_BAR
@@ -735,53 +846,54 @@ SUB edMessage (title$, lines$(), n AS INTEGER)
         NEXT
         _DISPLAY
         e = edUiWait&
+        IF edDlgDrag%%(e, lft, top, w, dx, dy) THEN e = 0
         IF e > 0 OR e = -1 THEN EXIT DO
     LOOP
     edUiEnd
 END SUB
 
 SUB edHelp
-    DIM h$(1 TO 40)
+    DIM h$(1 TO 28)
     h$(1) = "Alt or a click              menus (Alt+letter opens one)"
-    h$(2) = "Arrows, Home, End, PgUp/Dn  move (Ctrl+arrows: by word)"
-    h$(3) = "Shift + movement, drag      select (Ctrl+A: everything)"
-    h$(4) = "Ctrl+C / Ctrl+X / Ctrl+V    copy / cut / paste"
-    h$(5) = "                            (no selection: the whole line)"
+    h$(2) = "Right-click, Shift+F10      menu at the cursor"
+    h$(3) = "Arrows, Home, End, PgUp/Dn  move (Ctrl+arrows: by word)"
+    h$(4) = "Shift + movement, drag      select (Ctrl+A: everything)"
+    h$(5) = "Ctrl+C / Ctrl+X / Ctrl+V    copy / cut / paste (no selection: the line)"
     h$(6) = "Ctrl+Z / Ctrl+Y             undo / redo"
     h$(7) = "Tab / Shift+Tab             indent / unindent"
     h$(8) = "Ctrl+/                      comment / uncomment lines"
     h$(9) = "Ctrl+D / Ctrl+K             duplicate / delete lines"
     h$(10) = "Alt+Up / Alt+Down           move lines"
     h$(11) = "Ctrl+F, F3, Shift+F3        find, find next / previous"
-    h$(12) = "Ctrl+H                      replace"
-    h$(13) = "Ctrl+G                      go to line"
-    h$(14) = "Insert                      insert / overwrite"
-    h$(15) = "Ctrl+N / Ctrl+O             new / open"
-    h$(16) = "Ctrl+S / Ctrl+Shift+S       save / save as"
-    h$(17) = "F5                          run the program (continue when paused)"
-    h$(18) = "F7 / F8                     run line by line (into / over calls)"
-    h$(19) = "F6                          step out of a SUB or FUNCTION"
-    h$(20) = "F9, click a line number     breakpoint on/off"
-    h$(21) = "Shift+click a line number   skip the line (also Ctrl+F9)"
-    h$(22) = "F10                         clear all breakpoints"
-    h$(23) = "Ctrl+W                      variables, watches, watchpoints"
-    h$(24) = "F12                         call stack (while paused)"
-    h$(25) = "F4                          show the output screen"
-    h$(26) = "Esc                         back to the prompt (stop if paused)"
-    h$(27) = ""
-    h$(28) = "Enter indents after FOR, DO, IF...THEN, SUB and other"
-    h$(29) = "blocks; NEXT, LOOP, END IF... line up with their block."
-    h$(30) = "On macOS, Cmd works like Ctrl."
-    edMessage "Keys", h$(), 30
+    h$(12) = "Ctrl+H / Ctrl+G             replace / go to line"
+    h$(13) = "Insert                      insert / overwrite"
+    h$(14) = "Ctrl+N / Ctrl+O             new / open"
+    h$(15) = "Ctrl+S / Ctrl+Shift+S       save / save as"
+    h$(16) = "F5                          run the program (continue when paused)"
+    h$(17) = "F7 / F8 / F6                step into / over / out of a SUB or FUNCTION"
+    h$(18) = "Ctrl+F10                    set the next line to run (while paused)"
+    h$(19) = "F9, click a line number     breakpoint on/off"
+    h$(20) = "Shift+click a line number   skip the line (also Ctrl+F9)"
+    h$(21) = "F10                         clear all breakpoints"
+    h$(22) = "Ctrl+W / F12                variables and watches / call stack"
+    h$(23) = "F4                          show the output screen"
+    h$(24) = "Esc                         back to the prompt (stop if paused)"
+    h$(25) = ""
+    h$(26) = "Enter indents after FOR, DO, IF...THEN, SUB and other blocks;"
+    h$(27) = "NEXT, LOOP, END IF... line up with their block. Dialogs move"
+    h$(28) = "by dragging their title. On macOS, Cmd works like Ctrl."
+    edMessage "Keys", h$(), 28
 END SUB
 
 SUB edAbout
-    DIM h$(1 TO 4)
+    DIM h$(1 TO 6)
     h$(1) = "QB64 Interpreter"
-    h$(2) = ""
-    h$(3) = "Runs QB64 programs without compiling them."
-    h$(4) = "The editor's keys are under Help > Keys (F1)."
-    edMessage "About", h$(), 4
+    h$(2) = "by Fellippe Heitor, 2017-2026"
+    h$(3) = ""
+    h$(4) = "Runs QB64 programs without compiling them."
+    h$(5) = "The editor's keys are under Help > Keys (F1)."
+    h$(6) = "MIT License"
+    edMessage "About", h$(), 6
 END SUB
 
 '---------------------------------------------------------------- output screen
