@@ -825,35 +825,52 @@ FUNCTION edConfirm% (title$, msg$, buttons$, avoidRow AS LONG)
 END FUNCTION
 
 SUB edMessage (title$, lines$(), n AS INTEGER)
-    'a box of text lines; any key or click closes it
+    'a box of text lines with an OK button; any key or the button closes it
     DIM w AS LONG, h AS LONG, lft AS LONG, top AS LONG, i AS INTEGER, e AS LONG, dx AS LONG, dy AS LONG
+    DIM b$(1 TO 1), bx(1 TO 1) AS LONG, by AS LONG, pressed AS _BYTE, done AS _BYTE
     IF headless THEN EXIT SUB
+    b$(1) = "OK"
     edUiStart
     DO
         w = 0
         FOR i = 1 TO n
             IF LEN(lines$(i)) > w THEN w = LEN(lines$(i))
         NEXT
-        w = w + 6: IF w > edCols - 2 THEN w = edCols - 2
-        h = n + 4: IF h > edRows THEN h = edRows
+        w = w + 6: IF w < 20 THEN w = 20
+        IF w > edCols - 2 THEN w = edCols - 2
+        h = n + 6: IF h > edRows THEN h = edRows
         lft = (edCols - w) \ 2 + 1: top = (edRows - h) \ 2 + 1
         edDlgPlace lft, top, w, h, dx, dy
+        by = top + h - 3
+        edLayoutButtons b$(), 1, lft, w, bx()
         edDraw
         edBox lft, top, w, h, title$
         edColor EC_BARTEXT, EC_BAR
         FOR i = 1 TO n
-            IF i + 1 < h - 1 THEN edPut lft + 3, top + 1 + i, LEFT$(lines$(i), w - 6)
+            IF top + 1 + i < by - 1 THEN edPut lft + 3, top + 1 + i, LEFT$(lines$(i), w - 6)
         NEXT
+        edButton bx(1), by, b$(1), -1, pressed AND (edBtnHit%%(bx(1), by, b$(1)) OR done)
         _DISPLAY
+        IF done THEN _DELAY .12: EXIT DO 'let a key press show on the button
         e = edUiWait&
         IF edDlgDrag%%(e, lft, top, w, dx, dy) THEN e = 0
-        IF e > 0 OR e = -1 THEN EXIT DO
+        SELECT CASE e
+            CASE -1
+                IF edBtnHit%%(bx(1), by, b$(1)) THEN pressed = -1: edUiHover = -1
+            CASE -5 'release: the button counts if the pointer is still on it
+                IF pressed THEN
+                    IF edBtnHit%%(bx(1), by, b$(1)) THEN EXIT DO
+                END IF
+                pressed = 0: edUiHover = 0
+            CASE IS > 0: pressed = -1: done = -1
+        END SELECT
     LOOP
+    edUiHover = 0
     edUiEnd
 END SUB
 
 SUB edHelp
-    DIM h$(1 TO 28)
+    DIM h$(1 TO 26)
     h$(1) = "Alt or a click              menus (Alt+letter opens one)"
     h$(2) = "Right-click, Shift+F10      menu at the cursor"
     h$(3) = "Arrows, Home, End, PgUp/Dn  move (Ctrl+arrows: by word)"
@@ -861,28 +878,26 @@ SUB edHelp
     h$(5) = "Ctrl+C / Ctrl+X / Ctrl+V    copy / cut / paste (no selection: the line)"
     h$(6) = "Ctrl+Z / Ctrl+Y             undo / redo"
     h$(7) = "Tab / Shift+Tab             indent / unindent"
-    h$(8) = "Ctrl+/                      comment / uncomment lines"
-    h$(9) = "Ctrl+D / Ctrl+K             duplicate / delete lines"
-    h$(10) = "Alt+Up / Alt+Down           move lines"
-    h$(11) = "Ctrl+F, F3, Shift+F3        find, find next / previous"
-    h$(12) = "Ctrl+H / Ctrl+G             replace / go to line"
-    h$(13) = "Insert                      insert / overwrite"
-    h$(14) = "Ctrl+N / Ctrl+O             new / open"
-    h$(15) = "Ctrl+S / Ctrl+Shift+S       save / save as"
-    h$(16) = "F5                          run the program (continue when paused)"
-    h$(17) = "F7 / F8 / F6                step into / over / out of a SUB or FUNCTION"
-    h$(18) = "Ctrl+F10                    set the next line to run (while paused)"
-    h$(19) = "F9, click a line number     breakpoint on/off"
-    h$(20) = "Shift+click a line number   skip the line (also Ctrl+F9)"
-    h$(21) = "F10                         clear all breakpoints"
-    h$(22) = "Ctrl+W / F12                variables and watches / call stack"
-    h$(23) = "F4                          show the output screen"
-    h$(24) = "Esc                         back to the prompt (stop if paused)"
-    h$(25) = ""
-    h$(26) = "Enter indents after FOR, DO, IF...THEN, SUB and other blocks;"
-    h$(27) = "NEXT, LOOP, END IF... line up with their block. Dialogs move"
-    h$(28) = "by dragging their title. On macOS, Cmd works like Ctrl."
-    edMessage "Keys", h$(), 28
+    h$(8) = "Ctrl+D / Ctrl+K / Ctrl+/    duplicate / delete / comment lines"
+    h$(9) = "Alt+Up / Alt+Down           move lines"
+    h$(10) = "Ctrl+F, F3, Shift+F3        find, find next / previous"
+    h$(11) = "Ctrl+H / Ctrl+G             replace / go to line"
+    h$(12) = "Insert                      insert / overwrite"
+    h$(13) = "Ctrl+N / Ctrl+O / Ctrl+S    new / open / save (with Shift: save as)"
+    h$(14) = "F5                          run the program (continue when paused)"
+    h$(15) = "F7 / F8 / F6                step into / over / out of a SUB or FUNCTION"
+    h$(16) = "Ctrl+F10                    set the next line to run (while paused)"
+    h$(17) = "F9, click a line number     breakpoint on/off"
+    h$(18) = "Shift+click a line number   skip the line (also Ctrl+F9)"
+    h$(19) = "F10                         clear all breakpoints"
+    h$(20) = "Ctrl+W / F12                variables and watches / call stack"
+    h$(21) = "F4                          show the output screen"
+    h$(22) = "Esc                         back to the prompt (stop if paused)"
+    h$(23) = ""
+    h$(24) = "Enter indents after FOR, DO, IF...THEN, SUB and other blocks;"
+    h$(25) = "NEXT, LOOP, END IF... line up with their block. Dialogs move"
+    h$(26) = "by dragging their title. On macOS, Cmd works like Ctrl."
+    edMessage "Keys", h$(), 26
 END SUB
 
 SUB edAbout
