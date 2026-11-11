@@ -7,9 +7,9 @@
 SUB edInitMenus
     DIM t$
     t$ = CHR$(9)
-    edMenuN = 5
+    edMenuN = 6
     edMenuTitle$(1) = "&File": edMenuTitle$(2) = "&Edit": edMenuTitle$(3) = "&Search"
-    edMenuTitle$(4) = "&Run": edMenuTitle$(5) = "&Help"
+    edMenuTitle$(4) = "&Run": edMenuTitle$(5) = "&Debug": edMenuTitle$(6) = "&Help"
     edAddItem 1, "&New" + t$ + "Ctrl+N" + t$ + "new"
     edAddItem 1, "&Open..." + t$ + "Ctrl+O" + t$ + "open"
     edAddItem 1, "&Save" + t$ + "Ctrl+S" + t$ + "save"
@@ -35,10 +35,21 @@ SUB edInitMenus
     edAddItem 3, "&Replace..." + t$ + "Ctrl+H" + t$ + "replace"
     edAddItem 3, "-"
     edAddItem 3, "&Go to Line..." + t$ + "Ctrl+G" + t$ + "goto"
-    edAddItem 4, "&Start" + t$ + "F5" + t$ + "run"
+    edAddItem 4, "&Start / Continue" + t$ + "F5" + t$ + "run"
+    edAddItem 4, "S&top" + t$ + "Esc" + t$ + "stop"
     edAddItem 4, "&Output Screen" + t$ + "F4" + t$ + "output"
-    edAddItem 5, "&Keys" + t$ + "F1" + t$ + "keys"
-    edAddItem 5, "&About" + t$ + "" + t$ + "about"
+    edAddItem 5, "Step &Into" + t$ + "F7" + t$ + "into"
+    edAddItem 5, "Step &Over" + t$ + "F8" + t$ + "over"
+    edAddItem 5, "Step O&ut" + t$ + "F6" + t$ + "out"
+    edAddItem 5, "-"
+    edAddItem 5, "Toggle &Breakpoint" + t$ + "F9" + t$ + "bp"
+    edAddItem 5, "Toggle &Skip Line" + t$ + "Ctrl+F9" + t$ + "skip"
+    edAddItem 5, "&Clear All Breakpoints" + t$ + "F10" + t$ + "clearbp"
+    edAddItem 5, "-"
+    edAddItem 5, "&Variable List..." + t$ + "Ctrl+W" + t$ + "vars"
+    edAddItem 5, "Call S&tack" + t$ + "F12" + t$ + "stack"
+    edAddItem 6, "&Keys" + t$ + "F1" + t$ + "keys"
+    edAddItem 6, "&About" + t$ + "" + t$ + "about"
 END SUB
 
 SUB edAddItem (m AS INTEGER, s$)
@@ -199,7 +210,7 @@ SUB edMenu (startM AS INTEGER)
                 ELSEIF e = -1 THEN
                     EXIT DO
                 END IF
-            CASE EK_ESC, EK_F10, EK_MENU: EXIT DO
+            CASE EK_ESC, EK_MENU: EXIT DO
             CASE EK_LEFT: m = m - 1: IF m < 1 THEN m = edMenuN
                 sel = edMenuStep%(m, 0, 1)
             CASE EK_RIGHT: m = m + 1: IF m > edMenuN THEN m = 1
@@ -237,12 +248,20 @@ FUNCTION edMenuForKey% (k AS LONG)
 END FUNCTION
 
 SUB edCommand (c$)
+    IF dbgPaused THEN 'the program is paused: no editing, and Run/Exit mean continue/stop
+        SELECT CASE c$
+            CASE "new", "open", "undo", "redo", "cut", "paste", "dup", "delline", "comment", "indent", "outdent", "replace"
+                edSetMsg "The program is paused: F5 continues, Esc stops it": EXIT SUB
+            CASE "run": edQuit = ED_CONTINUE: EXIT SUB
+            CASE "exit", "stop": edQuit = ED_STOP: EXIT SUB
+        END SELECT
+    END IF
     SELECT CASE c$
         CASE "new": edNewFile
         CASE "open": edOpenFile
         CASE "save": edSave 0
         CASE "saveas": edSave -1
-        CASE "exit": edQuit = 1
+        CASE "exit": edQuit = ED_CLOSE
         CASE "undo": edUndoStep
         CASE "redo": edRedoStep
         CASE "cut": edCopy -1
@@ -259,8 +278,17 @@ SUB edCommand (c$)
         CASE "prev": IF edFind$ = "" THEN edFindPrompt ELSE edFindNext -1
         CASE "replace": edReplacePrompt
         CASE "goto": edGotoPrompt
-        CASE "run": edQuit = 2
+        CASE "run": edQuit = ED_RUN
+        CASE "stop": edSetMsg "The program isn't running"
         CASE "output": edShowOutput
+        CASE "into": IF dbgPaused THEN edQuit = ED_INTO ELSE edQuit = ED_STEP
+        CASE "over": IF dbgPaused THEN edQuit = ED_OVER ELSE edQuit = ED_STEP
+        CASE "out": IF dbgPaused AND callDepth > 0 THEN edQuit = ED_OUT ELSE edSetMsg "Not inside a SUB or FUNCTION"
+        CASE "bp": dbgToggleMark edCY, MARK_BREAK
+        CASE "skip": dbgToggleMark edCY, MARK_SKIP
+        CASE "clearbp": dbgClearBreakpoints
+        CASE "vars": dbgVarList
+        CASE "stack": dbgCallStack
         CASE "keys": edHelp
         CASE "about": edAbout
     END SELECT
@@ -692,8 +720,8 @@ SUB edMessage (title$, lines$(), n AS INTEGER)
 END SUB
 
 SUB edHelp
-    DIM h$(1 TO 26)
-    h$(1) = "F10, Alt or a click         menus (Alt+letter opens one)"
+    DIM h$(1 TO 40)
+    h$(1) = "Alt or a click              menus (Alt+letter opens one)"
     h$(2) = "Arrows, Home, End, PgUp/Dn  move (Ctrl+arrows: by word)"
     h$(3) = "Shift + movement, drag      select (Ctrl+A: everything)"
     h$(4) = "Ctrl+C / Ctrl+X / Ctrl+V    copy / cut / paste"
@@ -709,15 +737,21 @@ SUB edHelp
     h$(14) = "Insert                      insert / overwrite"
     h$(15) = "Ctrl+N / Ctrl+O             new / open"
     h$(16) = "Ctrl+S / Ctrl+Shift+S       save / save as"
-    h$(17) = "F5                          run the program"
-    h$(18) = "F4                          show the output screen"
-    h$(19) = "Esc                         back to the prompt"
-    h$(20) = ""
-    h$(21) = "Enter indents after FOR, DO, IF...THEN, SUB and other"
-    h$(22) = "blocks; NEXT, LOOP, END IF... line up with their block."
-    h$(23) = "Double-click selects a word; click the line numbers to"
-    h$(24) = "select lines. On macOS, Cmd works like Ctrl."
-    edMessage "Keys", h$(), 24
+    h$(17) = "F5                          run the program (continue when paused)"
+    h$(18) = "F7 / F8                     run line by line (into / over calls)"
+    h$(19) = "F6                          step out of a SUB or FUNCTION"
+    h$(20) = "F9, click a line number     breakpoint on/off"
+    h$(21) = "Shift+click a line number   skip the line (also Ctrl+F9)"
+    h$(22) = "F10                         clear all breakpoints"
+    h$(23) = "Ctrl+W                      variables, watches, watchpoints"
+    h$(24) = "F12                         call stack (while paused)"
+    h$(25) = "F4                          show the output screen"
+    h$(26) = "Esc                         back to the prompt (stop if paused)"
+    h$(27) = ""
+    h$(28) = "Enter indents after FOR, DO, IF...THEN, SUB and other"
+    h$(29) = "blocks; NEXT, LOOP, END IF... line up with their block."
+    h$(30) = "On macOS, Cmd works like Ctrl."
+    edMessage "Keys", h$(), 30
 END SUB
 
 SUB edAbout
@@ -734,14 +768,15 @@ SUB edShowOutput
     'F4: shows the prompt's screen (the program's output) until a key or click
     DIM k AS LONG, b AS _BYTE, t$
     IF headless THEN EXIT SUB
-    t$ = _TITLE$
+    t$ = curTitle$
     _RESIZE OFF
     SCREEN edPrevScreen
-    _TITLE "Output screen - press any key"
+    setTitle "Output screen - press any key"
     _DISPLAY
     _KEYCLEAR
     edUiStart
     DO
+        IF scriptMode THEN k = edGetKey&: EXIT DO 'the key comes from the script
         k = _KEYHIT
         IF k > 0 AND k < 100000 THEN EXIT DO
         DO WHILE _MOUSEINPUT
@@ -753,7 +788,7 @@ SUB edShowOutput
         _LIMIT 60
     LOOP
     SCREEN edImg
-    _TITLE t$
+    setTitle t$
     _RESIZE ON
     IF _RESIZE THEN k = 0 'drop the event from switching screens
     _KEYCLEAR
@@ -764,12 +799,12 @@ END SUB
 SUB edScrollGeom (trackTop AS LONG, trackH AS LONG, thumbY AS LONG, thumbH AS LONG, maxTop AS LONG)
     'the scroll bar sits in the last column; sizes in pixels
     DIM visible AS LONG, total AS LONG
-    visible = edRows - 2
+    visible = edTR
     total = edN
     IF edTop + visible - 1 > total THEN total = edTop + visible - 1
     maxTop = total - visible + 1
     IF maxTop < 1 THEN maxTop = 1
-    trackTop = 2 * 16: trackH = (edRows - 4) * 16
+    trackTop = 2 * 16: trackH = (edTR - 2) * 16
     IF trackH < 1 THEN trackH = 1
     thumbH = trackH * visible \ total
     IF thumbH < 12 THEN thumbH = 12
@@ -781,10 +816,10 @@ SUB edDrawScrollbar
     DIM trackTop AS LONG, trackH AS LONG, thumbY AS LONG, thumbH AS LONG, maxTop AS LONG, x AS LONG
     edScrollGeom trackTop, trackH, thumbY, thumbH, maxTop
     x = (edCols - 1) * 8
-    LINE (x, 16)-(x + 7, (edRows - 1) * 16 - 1), edPal(EC_TRACK), BF
+    LINE (x, 16)-(x + 7, (edTR + 1) * 16 - 1), edPal(EC_TRACK), BF
     edColor EC_THUMB, EC_TRACK
     edPut edCols, 2, CHR$(30)
-    edPut edCols, edRows - 1, CHR$(31)
+    edPut edCols, edTR + 1, CHR$(31)
     IF edMouseDown = 3 THEN
         LINE (x + 1, thumbY)-(x + 6, thumbY + thumbH - 1), edPal(EC_THUMBHOT), BF
     ELSE
@@ -798,15 +833,15 @@ SUB edScrollClick
     edScrollGeom trackTop, trackH, thumbY, thumbH, maxTop
     IF edMouseY <= 2 THEN
         edRepDir = -1
-    ELSEIF edMouseY >= edRows - 1 THEN
+    ELSEIF edMouseY >= edTR + 1 THEN
         edRepDir = 1
     ELSEIF edMousePY >= thumbY AND edMousePY < thumbY + thumbH THEN
         edMouseDown = 3: edThumbOfs = edMousePY - thumbY 'drag the thumb
         EXIT SUB
     ELSEIF edMousePY < thumbY THEN
-        edRepDir = -(edRows - 3)
+        edRepDir = -(edTR - 1)
     ELSE
-        edRepDir = edRows - 3
+        edRepDir = edTR - 1
     END IF
     edScrollBy edRepDir
     edMouseDown = 4: edRepT = TIMER + .4 'keeps going while held
@@ -814,7 +849,7 @@ END SUB
 
 SUB edScrollBy (n AS LONG)
     DIM visible AS LONG, maxTop AS LONG
-    visible = edRows - 2
+    visible = edTR
     maxTop = edN - visible + 1
     IF maxTop < 1 THEN maxTop = 1
     edTop = edTop + n
@@ -847,6 +882,7 @@ SUB edResetText
     'after New or Open: fresh history and cursor
     edUndoN = 0: edRedoN = 0: edSavedAt = 0: edLastKind = -1
     edCY = 1: edCX = 1: edWantX = 1: edTop = 1: edLeft = 0
+    REDIM edMark(1 TO edN) AS _BYTE
     edSelOn = 0: edErrLine = 0: edTypedLine = 0: edEdited = -1
 END SUB
 

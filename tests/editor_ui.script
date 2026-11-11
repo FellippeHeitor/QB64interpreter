@@ -2,13 +2,13 @@ NEW
 a = 1{enter}b = 2{enter}c = 3{enter}PRINT a + b + c{alt+s}g2{enter}{end} + 10{esc}
 LIST
 EDIT
-{f10}{left}{left}{enter}
+{menu}{left}{left}{left}{enter}
 {space}{esc}
 EDIT
 {alt+e}a{alt+e}t{alt+e}u{esc}
 LIST
 EDIT
-{f10}{right}{down}{down}{down}{down}{down}{enter}{ctrl+c}{ctrl+end}{enter}{ctrl+v}{esc}
+{menu}{right}{down}{down}{down}{down}{down}{enter}{ctrl+c}{ctrl+end}{enter}{ctrl+v}{esc}
 LIST
 EDIT
 {ctrl+home}{ctrl+h}x{tab}y{shift+tab}{bksp}={enter}{end}{bksp}=={enter}nyc{esc}
@@ -25,7 +25,7 @@ EDIT
 {ctrl+shift+s}tests/_ui_tmp{enter}n{ctrl+shift+s}tests/_ui_tmp{enter}y{esc}
 KILL "tests/_ui_tmp.bas"
 EDIT
-{alt+h}k{alt+h}a{f4}{f10}{esc}{menu}{esc}{esc}
+{alt+h}k{alt+h}a{f4}{menu}{esc}{menu}{esc}{esc}
 LIST 1
 EDIT
 {ctrl+f}abcdef{shift+left}{shift+left}X{enter}{ctrl+f}hello world{ctrl+left}{shift+ctrl+right}{del}{enter}{ctrl+f}abc{home}{shift+end}{ctrl+x}{ctrl+v}{ctrl+v}{enter}{ctrl+f}{shift+left}Z{enter}{ctrl+f}{end}{shift+home}{shift+right}{bksp}{enter}{esc}

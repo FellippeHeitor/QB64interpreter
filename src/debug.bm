@@ -1,0 +1,534 @@
+'Debugging programs run from the editor: stepping, breakpoints, lines to
+'skip, watches and watchpoints, and the call stack.
+'
+'runFrom calls dbgCheck before each statement while dbgActive is set. When
+'execution has to stop, dbgPause shows the editor in debug mode (read-only,
+'with an arrow at the next line to run) until a key says how to go on.
+'
+'In -script mode the keys come from the script and each pause is printed
+'("debug: paused at line n", then one line per watch), so tests can follow.
+
+SUB dbgStart (stepping AS _BYTE)
+    DIM i AS LONG
+    dbgActive = -1: dbgStopped = 0: dbgPaused = 0
+    IF stepping THEN dbgMode = DBG_INTO ELSE dbgMode = DBG_RUN
+    dbgDepth = 0: dbgLastLine = 0: dbgLastDepth = -1: dbgExecLine = 0
+    FOR i = 1 TO wCount: wHit(i) = 0: NEXT
+END SUB
+
+FUNCTION dbgCheck% (pc AS LONG)
+    'before statement pc: 0 run it, 1 skip it, 2 stop the program
+    DIM ln AS LONG, m AS INTEGER, newLine AS _BYTE, why$, i AS LONG, r AS _BYTE
+
+    ln = stmts(pc).lineNo
+    newLine = (ln <> dbgLastLine OR callDepth <> dbgLastDepth)
+    dbgLastLine = ln: dbgLastDepth = callDepth
+    IF ln >= 1 AND ln <= UBOUND(edMark) THEN m = edMark(ln)
+
+    'a line marked to skip doesn't run (SUB lines must, so bodies stay hidden)
+    IF (m AND MARK_SKIP) AND stmts(pc).kind <> stSUB AND stmts(pc).kind <> stENDSUB THEN
+        pcNext = pc + 1
+        dbgCheck% = 1
+        EXIT FUNCTION
+    END IF
+
+    IF newLine AND stmts(pc).kind <> stSUB THEN 'SUB lines only jump over the body
+        IF m AND MARK_BREAK THEN why$ = "Breakpoint"
+        SELECT CASE dbgMode
+            CASE DBG_INTO: IF why$ = "" THEN why$ = " "
+            CASE DBG_OVER: IF callDepth <= dbgDepth AND why$ = "" THEN why$ = " "
+            CASE DBG_OUT: IF callDepth < dbgDepth AND why$ = "" THEN why$ = " "
+        END SELECT
+    END IF
+
+    'watchpoints stop when their condition becomes true
+    FOR i = 1 TO wCount
+        IF LEN(wCond$(i)) THEN
+            r = dbgCondTrue%%(wName$(i), wCond$(i))
+            IF r AND wHit(i) = 0 THEN why$ = "Watchpoint: " + wName$(i) + " " + wCond$(i)
+            wHit(i) = r
+        END IF
+    NEXT
+
+    IF LEN(why$) THEN dbgCheck% = dbgPause%(ln, _TRIM$(why$))
+END FUNCTION
+
+FUNCTION dbgPause% (ln AS LONG, why$)
+    'shows the editor at line ln until the user picks how to go on
+    DIM pDest AS LONG, pSource AS LONG, pDisplay AS LONG, pAuto AS _BYTE, i AS LONG
+    DIM scrCopy AS LONG, pRow AS LONG, pCol AS LONG, pFG AS _UNSIGNED LONG, pBG AS _UNSIGNED LONG
+
+    dbgExecLine = ln: dbgPaused = -1
+    IF headless THEN
+        IF why$ = "" THEN PRINT "debug: paused at line"; ln ELSE PRINT "debug: paused at line"; ln; "- "; why$
+        FOR i = 1 TO wCount
+            PRINT "debug:   "; wName$(i); " = "; dbgValue$(wName$(i));
+            IF LEN(wCond$(i)) THEN PRINT "  (stop when "; wCond$(i); ")" ELSE PRINT
+        NEXT
+    END IF
+
+    'the editor at the paused line
+    IF UBOUND(edL) < edN OR edN < 1 THEN edN = UBOUND(edL)
+    edCY = ln: edCX = 1: edWantX = 1: edSelOn = 0
+    edCalcGutter
+    IF edCY < edTop OR edCY > edTop + edTR - 1 THEN edTop = edCY - edTR \ 2
+    edEnsureVisible
+    edQuit = 0: edMsg$ = why$: edErrLine = 0
+
+    IF NOT headless THEN
+        'QB64 frees the default screen when another one is shown, so the
+        'debugger works with a copy of the program's screen (F4 shows it)
+        pDest = _DEST: pSource = _SOURCE: pDisplay = _DISPLAY: pAuto = _AUTODISPLAY
+        _DEST pDisplay
+        pRow = CSRLIN: pCol = POS(0): pFG = _DEFAULTCOLOR: pBG = _BACKGROUNDCOLOR
+        scrCopy = _COPYIMAGE(pDisplay)
+        edScreenOpen scrCopy
+    END IF
+    edLoop
+    IF NOT headless THEN
+        edScreenClose
+        IF imageAlive%%(pDisplay) THEN
+            SCREEN pDisplay 'the program's own image is still there
+            _FREEIMAGE scrCopy
+        ELSE
+            'the copy becomes the program's screen
+            COLOR pFG, pBG
+            IF pRow >= 1 AND pCol >= 1 THEN LOCATE pRow, pCol
+            IF pDest = pDisplay THEN pDest = 0 'was drawing on the screen: still is
+            IF pSource = pDisplay THEN pSource = 0
+        END IF
+        IF pDest <> 0 THEN IF imageAlive%%(pDest) = 0 THEN pDest = 0
+        IF pSource <> 0 THEN IF imageAlive%%(pSource) = 0 THEN pSource = 0
+        IF pDest THEN _DEST pDest ELSE _DEST 0
+        IF pSource THEN _SOURCE pSource ELSE _SOURCE 0
+        IF pAuto THEN _AUTODISPLAY ELSE _DISPLAY
+        _KEYCLEAR 'keys pressed in the debugger aren't for the program
+    END IF
+
+    SELECT CASE edQuit
+        CASE ED_CONTINUE: dbgMode = DBG_RUN
+        CASE ED_INTO: dbgMode = DBG_INTO
+        CASE ED_OVER: dbgMode = DBG_OVER: dbgDepth = callDepth
+        CASE ED_OUT: dbgMode = DBG_OUT: dbgDepth = callDepth
+        CASE ED_STOP: dbgStopped = -1: dbgPause% = 2
+    END SELECT
+    edQuit = 0
+    dbgPaused = 0: dbgExecLine = 0
+END FUNCTION
+
+'---------------------------------------------------------------- breakpoints
+FUNCTION imageAlive%% (h AS LONG)
+    'whether an image handle is still valid (QB64 raises "Invalid handle")
+    DIM saved AS INTEGER, w AS LONG
+    saved = runtimeErr: runtimeErr = 0
+    w = _WIDTH(h)
+    imageAlive%% = (runtimeErr = 0)
+    runtimeErr = saved
+END FUNCTION
+
+SUB dbgToggleMark (y AS LONG, mark AS INTEGER)
+    'breakpoints and skipped lines exclude each other
+    IF y < 1 OR y > edN THEN EXIT SUB
+    IF UBOUND(edMark) < edN THEN REDIM _PRESERVE edMark(1 TO edN) AS _BYTE
+    IF edMark(y) AND mark THEN edMark(y) = 0 ELSE edMark(y) = mark
+END SUB
+
+SUB dbgClearBreakpoints
+    DIM i AS LONG, n AS LONG
+    FOR i = 1 TO UBOUND(edMark)
+        IF edMark(i) AND MARK_BREAK THEN edMark(i) = 0: n = n + 1
+    NEXT
+    IF n THEN edSetMsg "Breakpoints cleared" ELSE edSetMsg "No breakpoints"
+END SUB
+
+'---------------------------------------------------------------- variables
+FUNCTION dbgGet%% (name$, v AS valType)
+    'the current value of a variable or array element, in the paused scope
+    DIM i AS LONG, n$, sErr AS _BYTE, sCode AS INTEGER, sRun AS _BYTE, sEval AS INTEGER, sRt AS INTEGER
+    n$ = _TRIM$(name$)
+    IF n$ = "" THEN EXIT FUNCTION
+    IF INSTR(n$, "(") THEN
+        'an array element: evaluate it without reporting errors
+        IF findArray(LEFT$(n$, INSTR(n$, "(") - 1)) = 0 THEN EXIT FUNCTION
+        sErr = errorHappened: sCode = lastErrorCode: sRun = running: sEval = evalErr: sRt = runtimeErr
+        errorHappened = -1: MyBad = -1
+        evaluate n$, v
+        dbgGet%% = (evalErr = 0)
+        MyBad = 0
+        errorHappened = sErr: lastErrorCode = sCode: running = sRun: evalErr = sEval: runtimeErr = sRt
+        EXIT FUNCTION
+    END IF
+    i = findName(n$, "")
+    IF i = 0 THEN EXIT FUNCTION
+    IF vars(i).isArray THEN EXIT FUNCTION
+    v.isText = (vars(i).type = varTypeSTRING)
+    v.t = vars(i).type
+    IF v.isText THEN v.s = strings(i): v.n = 0 ELSE v.n = nums(i): v.s = ""
+    dbgGet%% = -1
+END FUNCTION
+
+FUNCTION dbgValue$ (name$)
+    DIM v AS valType
+    IF dbgGet%%(name$, v) = 0 THEN dbgValue$ = "(not available)": EXIT FUNCTION
+    IF v.isText THEN dbgValue$ = CHR$(34) + v.s + CHR$(34) ELSE dbgValue$ = _TRIM$(numStr$(v.n, v.t))
+END FUNCTION
+
+FUNCTION dbgCondTrue%% (name$, cond$)
+    'cond$ is a relational operator and a value, e.g. "> 10" or "= " + q + "abc" + q
+    DIM c$, op$, rhs$, v AS valType, a AS _FLOAT, b AS _FLOAT, cmp AS INTEGER
+    c$ = _TRIM$(cond$)
+    IF LEFT$(c$, 2) = "<>" OR LEFT$(c$, 2) = ">=" OR LEFT$(c$, 2) = "<=" THEN
+        op$ = LEFT$(c$, 2)
+    ELSEIF INSTR("=<>", LEFT$(c$, 1)) > 0 AND LEN(c$) > 0 THEN
+        op$ = LEFT$(c$, 1)
+    ELSE
+        EXIT FUNCTION
+    END IF
+    rhs$ = _TRIM$(MID$(c$, LEN(op$) + 1))
+    IF dbgGet%%(name$, v) = 0 THEN EXIT FUNCTION
+    IF v.isText THEN
+        IF LEFT$(rhs$, 1) = CHR$(34) THEN rhs$ = removeQuote$(rhs$)
+        IF v.s < rhs$ THEN cmp = -1 ELSE IF v.s > rhs$ THEN cmp = 1
+    ELSE
+        a = v.n: b = VAL(rhs$)
+        IF a < b THEN cmp = -1 ELSE IF a > b THEN cmp = 1
+    END IF
+    SELECT CASE op$
+        CASE "=": dbgCondTrue%% = (cmp = 0)
+        CASE "<>": dbgCondTrue%% = (cmp <> 0)
+        CASE ">": dbgCondTrue%% = (cmp > 0)
+        CASE "<": dbgCondTrue%% = (cmp < 0)
+        CASE ">=": dbgCondTrue%% = (cmp >= 0)
+        CASE "<=": dbgCondTrue%% = (cmp <= 0)
+    END SELECT
+END FUNCTION
+
+FUNCTION dbgWatchIndex& (name$)
+    DIM i AS LONG
+    FOR i = 1 TO wCount
+        IF UCASE$(wName$(i)) = UCASE$(_TRIM$(name$)) THEN dbgWatchIndex& = i: EXIT FUNCTION
+    NEXT
+END FUNCTION
+
+FUNCTION dbgAddWatch& (name$)
+    DIM i AS LONG
+    i = dbgWatchIndex&(name$)
+    IF i = 0 THEN
+        wCount = wCount + 1
+        IF wCount > UBOUND(wName$) THEN REDIM _PRESERVE wName$(wCount + 10), wCond$(wCount + 10), wHit(wCount + 10) AS _BYTE
+        i = wCount
+        wName$(i) = _TRIM$(name$): wCond$(i) = "": wHit(i) = 0
+    END IF
+    dbgAddWatch& = i
+END FUNCTION
+
+SUB dbgRemoveWatch (i AS LONG)
+    DIM j AS LONG
+    IF i < 1 OR i > wCount THEN EXIT SUB
+    FOR j = i + 1 TO wCount
+        wName$(j - 1) = wName$(j): wCond$(j - 1) = wCond$(j): wHit(j - 1) = wHit(j)
+    NEXT
+    wCount = wCount - 1
+END SUB
+
+FUNCTION dbgCollectVars& (names$(), idx() AS LONG)
+    'variables visible from the paused scope (locals first), then watched
+    'names that don't exist (yet)
+    DIM i AS LONG, n AS LONG, k$, pass AS INTEGER, w AS LONG
+    REDIM names$(0), idx(0) AS LONG
+    FOR pass = 1 TO 2
+        FOR i = builtinCount + 1 TO totalVars
+            k$ = vars(i).key
+            IF k$ = "" OR vars(i).name = "" OR LEFT$(vars(i).name, 1) = "#" THEN _CONTINUE
+            IF pass = 1 THEN 'locals of the current SUB/FUNCTION
+                IF frameId = 0 OR LEFT$(k$, LEN(framePrefix$)) <> framePrefix$ THEN _CONTINUE
+            ELSE 'main module variables (inside a SUB, only the SHARED ones)
+                IF LEFT$(k$, 1) = "#" THEN _CONTINUE
+                IF frameId <> 0 AND vars(i).isShared = 0 AND vars(i).isConst = 0 THEN _CONTINUE
+            END IF
+            n = n + 1
+            REDIM _PRESERVE names$(n), idx(n) AS LONG
+            names$(n) = vars(i).name: idx(n) = i
+            IF vars(i).isArray THEN names$(n) = names$(n) + "()"
+        NEXT
+    NEXT
+    FOR w = 1 TO wCount
+        FOR i = 1 TO n
+            IF UCASE$(names$(i)) = UCASE$(wName$(w)) THEN EXIT FOR
+        NEXT
+        IF i > n THEN
+            n = n + 1
+            REDIM _PRESERVE names$(n), idx(n) AS LONG
+            names$(n) = wName$(w): idx(n) = 0
+        END IF
+    NEXT
+    dbgCollectVars& = n
+END FUNCTION
+
+FUNCTION dbgVarText$ (name$, i AS LONG)
+    'a row of the Variable List: watch mark, name, value, condition
+    DIM t$, r AS LONG, d AS INTEGER, w AS LONG
+    w = dbgWatchIndex&(name$)
+    IF w THEN t$ = "[W] " ELSE t$ = "[ ] "
+    t$ = t$ + LEFT$(name$ + SPACE$(18), 18) + " "
+    IF i THEN
+        r = resolveVar(i)
+        IF vars(r).isArray THEN
+            t$ = t$ + "("
+            FOR d = 1 TO vars(r).nDims
+                IF d > 1 THEN t$ = t$ + ", "
+                t$ = t$ + _TRIM$(STR$(dimLo(vars(r).dimStart + d - 1))) + " TO " + _TRIM$(STR$(dimHi(vars(r).dimStart + d - 1)))
+            NEXT
+            t$ = t$ + ")"
+        ELSEIF vars(r).type = varTypeSTRING THEN
+            t$ = t$ + "= " + CHR$(34) + strings(r) + CHR$(34)
+        ELSE
+            t$ = t$ + "= " + _TRIM$(numStr$(nums(r), vars(r).type))
+        END IF
+    ELSE
+        t$ = t$ + "= " + dbgValue$(name$)
+    END IF
+    IF w THEN
+        IF LEN(wCond$(w)) THEN t$ = t$ + "   stop when " + wCond$(w)
+    END IF
+    dbgVarText$ = t$
+END FUNCTION
+
+SUB dbgSetVar (i AS LONG, text$)
+    DIM r AS LONG, t$
+    r = resolveVar(i)
+    IF vars(r).isConst OR vars(r).isArray THEN edSetMsg "Can't change " + vars(i).name: EXIT SUB
+    t$ = _TRIM$(text$)
+    IF vars(r).type = varTypeSTRING THEN
+        IF LEFT$(t$, 1) = CHR$(34) THEN t$ = removeQuote$(t$) ELSE t$ = text$
+        strings(r) = t$
+    ELSE
+        nums(r) = coerce(VAL(t$), vars(r).type)
+    END IF
+    edSetMsg vars(i).name + " = " + dbgVarText2$(r)
+END SUB
+
+FUNCTION dbgVarText2$ (r AS LONG)
+    IF vars(r).type = varTypeSTRING THEN dbgVarText2$ = CHR$(34) + strings(r) + CHR$(34) ELSE dbgVarText2$ = _TRIM$(numStr$(nums(r), vars(r).type))
+END FUNCTION
+
+SUB dbgVarList
+    'the Variable List: pick variables to watch, change values while the
+    'program is paused, and set watchpoint conditions
+    DIM names$(0), idx(0) AS LONG, n AS LONG, sel AS LONG, topRow AS LONG, rows AS LONG
+    DIM w AS LONG, h AS LONG, lft AS LONG, top AS LONG, e AS LONG, i AS LONG, j AS LONG, r AS LONG
+    DIM b$(1 TO 5), bx(1 TO 5) AS LONG, by AS LONG, pressed AS INTEGER, done AS INTEGER, t$, cmd AS INTEGER
+
+    b$(1) = "&Watch": b$(2) = "&Set Value": b$(3) = "&Condition": b$(4) = "&Add...": b$(5) = "Close"
+    sel = 1
+    edUiStart
+    DO
+        n = dbgCollectVars&(names$(), idx())
+        IF sel > n THEN sel = n
+        IF sel < 1 THEN sel = 1
+        w = 70: IF w > edCols - 2 THEN w = edCols - 2
+        rows = edRows - 12: IF rows > 16 THEN rows = 16
+        IF rows < 3 THEN rows = 3
+        h = rows + 8
+        lft = (edCols - w) \ 2 + 1: top = (edRows - h) \ 2 + 1
+        IF top < 1 THEN top = 1
+        by = top + h - 3
+        edLayoutButtons b$(), 5, lft, w, bx()
+        IF sel < topRow + 1 THEN topRow = sel - 1
+        IF sel > topRow + rows THEN topRow = sel - rows
+        IF topRow < 0 THEN topRow = 0
+
+        IF NOT headless THEN
+            edDraw
+            edBox lft, top, w, h, "Variable List"
+            edColor EC_BARTEXT, EC_BAR
+            IF dbgPaused THEN t$ = "Variables at line" + STR$(dbgExecLine) ELSE t$ = "Variables (values while the program is paused)"
+            edPut lft + 2, top + 1, LEFT$(t$, w - 4)
+            FOR i = 1 TO rows
+                j = topRow + i
+                IF j <= n THEN
+                    t$ = dbgVarText$(names$(j), idx(j))
+                    IF j = sel THEN edColor EC_BRIGHT, EC_SEL ELSE edColor EC_TEXT, EC_BG
+                ELSE
+                    t$ = ""
+                    edColor EC_TEXT, EC_BG
+                END IF
+                edPut lft + 2, top + 2 + i, LEFT$(" " + t$ + SPACE$(w), w - 4)
+            NEXT
+            IF n = 0 THEN edColor EC_GUTTER, EC_BG: edPut lft + 3, top + 3, "No variables yet - Add... watches one by name"
+            FOR i = 1 TO 5
+                edButton bx(i), by, b$(i), (i = 1), (i = pressed AND (edBtnHit%%(bx(i), by, b$(i)) OR done))
+            NEXT
+            _DISPLAY
+            IF done THEN _DELAY .12
+        END IF
+        IF done THEN cmd = done: done = 0: pressed = 0 ELSE cmd = 0
+
+        IF cmd = 0 THEN
+            e = edUiWait&
+            SELECT CASE e
+                CASE -1
+                    pressed = 0
+                    FOR i = 1 TO 5
+                        IF edBtnHit%%(bx(i), by, b$(i)) THEN pressed = i: edUiHover = -1
+                    NEXT
+                    IF edMouseX > lft AND edMouseX < lft + w - 1 AND edMouseY >= top + 3 AND edMouseY < top + 3 + rows THEN
+                        j = topRow + edMouseY - top - 2
+                        IF j <= n THEN
+                            IF j = sel AND edMouseX <= lft + 5 THEN cmd = 1 'clicking [ ] toggles the watch
+                            sel = j
+                        END IF
+                    END IF
+                CASE -5
+                    IF pressed THEN
+                        IF edBtnHit%%(bx(pressed), by, b$(pressed)) THEN cmd = pressed
+                    END IF
+                    pressed = 0: edUiHover = 0
+                CASE EK_ESC: EXIT DO
+                CASE EK_UP: sel = sel - 1
+                CASE EK_DOWN: sel = sel + 1
+                CASE EK_PGUP: sel = sel - rows
+                CASE EK_PGDN: sel = sel + rows
+                CASE EK_HOME: sel = 1
+                CASE EK_END: sel = n
+                CASE 32: cmd = 1
+                CASE EK_ENTER: IF dbgPaused THEN done = 2 ELSE done = 1
+                CASE 65 TO 90, 97 TO 122
+                    FOR i = 1 TO 5
+                        IF edHotkey%(b$(i)) = (e OR 32) THEN done = i
+                    NEXT
+            END SELECT
+            IF done THEN pressed = done 'show the button pushed in for a moment
+        END IF
+
+        SELECT CASE cmd
+            CASE 1 'watch / unwatch
+                IF n THEN
+                    t$ = names$(sel)
+                    IF RIGHT$(t$, 2) = "()" THEN
+                        edSetMsg "Watch an element instead, e.g. " + LEFT$(t$, LEN(t$) - 2) + "(1) - use Add..."
+                    ELSE
+                        j = dbgWatchIndex&(t$)
+                        IF j THEN dbgRemoveWatch j ELSE j = dbgAddWatch&(t$)
+                    END IF
+                END IF
+            CASE 2 'set value
+                IF dbgPaused = 0 THEN
+                    edSetMsg "Values can be changed while the program is paused"
+                ELSEIF n THEN
+                    IF idx(sel) = 0 THEN
+                        edSetMsg names$(sel) + " doesn't exist here"
+                    ELSE
+                        r = resolveVar(idx(sel))
+                        IF vars(r).isArray OR vars(r).isConst THEN
+                            edSetMsg "Can't change " + names$(sel)
+                        ELSE
+                            t$ = edInputBox$("Set Value", names$(sel) + " =", dbgVarText2$(r))
+                            IF edPromptCancel = 0 THEN dbgSetVar idx(sel), t$
+                        END IF
+                    END IF
+                END IF
+            CASE 3 'watchpoint condition
+                IF n THEN
+                    t$ = names$(sel)
+                    IF RIGHT$(t$, 2) <> "()" THEN
+                        j = dbgWatchIndex&(t$)
+                        IF j THEN t$ = wCond$(j) ELSE t$ = ""
+                        t$ = edInputBox$("Watchpoint", "Stop when " + names$(sel) + " is (e.g. > 10):", t$)
+                        IF edPromptCancel = 0 THEN
+                            j = dbgAddWatch&(names$(sel))
+                            wCond$(j) = _TRIM$(t$): wHit(j) = 0
+                            IF LEN(wCond$(j)) THEN
+                                IF dbgValidCond%%(wCond$(j)) = 0 THEN edSetMsg "Use =, <>, <, >, <= or >= and a value": wCond$(j) = ""
+                            END IF
+                        END IF
+                    END IF
+                END IF
+            CASE 4 'add a watch by name (also array elements)
+                t$ = _TRIM$(edInputBox$("Add Watch", "Variable or array element:", ""))
+                IF edPromptCancel = 0 AND LEN(t$) THEN
+                    j = dbgAddWatch&(t$)
+                    n = dbgCollectVars&(names$(), idx())
+                    FOR i = 1 TO n
+                        IF UCASE$(names$(i)) = UCASE$(t$) THEN sel = i
+                    NEXT
+                END IF
+            CASE 5: EXIT DO
+        END SELECT
+    LOOP
+    edUiHover = 0
+    edUiEnd
+END SUB
+
+FUNCTION dbgValidCond%% (c$)
+    DIM t$
+    t$ = _TRIM$(c$)
+    IF LEFT$(t$, 2) = "<>" OR LEFT$(t$, 2) = ">=" OR LEFT$(t$, 2) = "<=" THEN t$ = MID$(t$, 3) ELSE IF INSTR("=<>", LEFT$(t$, 1)) > 0 AND LEN(t$) > 0 THEN t$ = MID$(t$, 2) ELSE EXIT FUNCTION
+    dbgValidCond%% = (LEN(_TRIM$(t$)) > 0)
+END FUNCTION
+
+'---------------------------------------------------------------- call stack
+FUNCTION dbgProcName$ (p AS LONG)
+    DIM t$
+    IF p = 0 THEN dbgProcName$ = "main module": EXIT FUNCTION
+    t$ = _TRIM$(stmts(procs(p).startIdx).text) 'SUB name (...) / FUNCTION name (...)
+    t$ = _TRIM$(MID$(t$, INSTR(t$, " ") + 1))
+    IF INSTR(t$, "(") THEN t$ = _TRIM$(LEFT$(t$, INSTR(t$, "(") - 1))
+    IF INSTR(t$, " ") THEN t$ = LEFT$(t$, INSTR(t$, " ") - 1)
+    IF procs(p).isFunc THEN dbgProcName$ = "FUNCTION " + t$ ELSE dbgProcName$ = "SUB " + t$
+END FUNCTION
+
+SUB dbgCallStack
+    DIM l$(1 TO 40), n AS INTEGER, d AS LONG
+    IF dbgPaused = 0 THEN edSetMsg "The call stack shows while the program is paused": EXIT SUB
+    n = 1: l$(1) = dbgProcName$(curProc) + ", line" + STR$(dbgExecLine) + "   <- paused here"
+    FOR d = callDepth TO 1 STEP -1
+        IF n = 40 THEN EXIT FOR
+        n = n + 1
+        l$(n) = dbgProcName$(csProc(d - 1)) + ", line" + STR$(csLine(d))
+    NEXT
+    IF headless THEN
+        FOR d = 1 TO n: PRINT "debug: stack: "; l$(d): NEXT
+    ELSE
+        edMessage "Call Stack", l$(), n
+    END IF
+END SUB
+
+'---------------------------------------------------------------- watch panel
+FUNCTION dbgPanelRows%
+    'rows the watch panel needs under the text while paused (0 to 3)
+    DIM i AS LONG, x AS LONG, r AS INTEGER, t$
+    IF dbgPaused = 0 OR wCount = 0 THEN EXIT FUNCTION
+    r = 1: x = 8
+    FOR i = 1 TO wCount
+        t$ = dbgWatchText$(i)
+        IF x + LEN(t$) + 3 > edCols AND x > 8 THEN r = r + 1: x = 8
+        x = x + LEN(t$) + 3
+    NEXT
+    IF r > 3 THEN r = 3
+    dbgPanelRows% = r
+END FUNCTION
+
+FUNCTION dbgWatchText$ (i AS LONG)
+    DIM t$
+    t$ = wName$(i) + " = " + dbgValue$(wName$(i))
+    IF LEN(wCond$(i)) THEN t$ = t$ + " [" + wCond$(i) + "]"
+    dbgWatchText$ = LEFT$(t$, edCols - 12)
+END FUNCTION
+
+SUB dbgDrawPanel (firstRow AS LONG, nRows AS INTEGER)
+    DIM i AS LONG, x AS LONG, r AS LONG, t$
+    edColor EC_TEXT, EC_CURLINE
+    FOR r = firstRow TO firstRow + nRows - 1: edPut 1, r, SPACE$(edCols): NEXT
+    edColor EC_LABEL, EC_CURLINE
+    edPut 2, firstRow, "Watch"
+    r = firstRow: x = 9
+    FOR i = 1 TO wCount
+        t$ = dbgWatchText$(i)
+        IF x + LEN(t$) + 3 > edCols AND x > 9 THEN r = r + 1: x = 9
+        IF r >= firstRow + nRows THEN EXIT FOR
+        edColor EC_TEXT, EC_CURLINE
+        edPut x, r, t$
+        x = x + LEN(t$) + 3
+    NEXT
+END SUB

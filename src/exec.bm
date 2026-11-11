@@ -27,6 +27,12 @@ SUB runFrom (startPc AS LONG)
         pcNext = pc + 1
         currentLine = stmts(pc).lineNo
         errorHappened = false
+        IF dbgActive THEN 'debugging from the editor (debug.bm)
+            SELECT CASE dbgCheck%(pc)
+                CASE 1: pc = pcNext: _CONTINUE 'a skipped line
+                CASE 2: running = false: EXIT DO 'stopped
+            END SELECT
+        END IF
         execStmt pc
         IF runtimeErr THEN
             throwError runtimeErr
@@ -325,7 +331,7 @@ SUB execSimple (t$)
             ELSE
                 throwError 2
             END IF
-        CASE "_TITLE": _TITLE textArg$(rest$)
+        CASE "_TITLE": setTitle textArg$(rest$)
         CASE "_SCREENMOVE"
             IF u$ = "_MIDDLE" THEN _SCREENMOVE _MIDDLE ELSE doTwoNums rest$, 2
         CASE "_DISPLAY": _DISPLAY
@@ -537,6 +543,8 @@ SUB callProc (p AS LONG, argText$(), nArgs AS LONG, result AS valType)
     framePrefix$ = "#" + LTRIM$(STR$(frameId)) + ":"
     curProc = p
     callDepth = callDepth + 1
+    IF callDepth > UBOUND(csProc) THEN REDIM _PRESERVE csProc(callDepth + 50) AS LONG, csLine(callDepth + 50) AS LONG
+    csProc(callDepth) = p: csLine(callDepth) = saveLine
     FOR i = 1 TO np
         IF pArr(i) OR pRef(i) THEN
             j = newVar(pName$(i), pType(i), pArr(i), false)

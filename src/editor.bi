@@ -6,12 +6,29 @@ CONST EK_HOME = 18176, EK_END = 20224, EK_PGUP = 18688, EK_PGDN = 20736
 CONST EK_INS = 20992, EK_DEL = 21248, EK_F1 = 15104, EK_F3 = 15616, EK_F5 = 16128
 CONST EK_BKSP = 8, EK_TAB = 9, EK_ENTER = 13, EK_ESC = 27
 CONST EK_F4 = 15872, EK_F10 = 17408, EK_MENU = 1000001 'EK_MENU: Alt pressed and released alone
+CONST EK_F6 = 16384, EK_F7 = 16640, EK_F8 = 16896, EK_F9 = 17152, EK_F12 = 34304
+
+'what closed the editor (edQuit)
+CONST ED_CLOSE = 1, ED_RUN = 2, ED_STEP = 3
+CONST ED_CONTINUE = 20, ED_INTO = 21, ED_OVER = 22, ED_OUT = 23, ED_STOP = 29 'while paused
+
+'debugger (debug.bm)
+CONST DBG_RUN = 0, DBG_INTO = 1, DBG_OVER = 2, DBG_OUT = 3
+CONST MARK_BREAK = 1, MARK_SKIP = 2
+REDIM SHARED edMark(1 TO 1) AS _BYTE 'per line: breakpoint or skip
+DIM SHARED dbgActive AS _BYTE, dbgStopped AS _BYTE, dbgPaused AS _BYTE, dbgMode AS INTEGER
+DIM SHARED dbgDepth AS LONG, dbgLastLine AS LONG, dbgLastDepth AS LONG, dbgExecLine AS LONG
+REDIM SHARED wName$(0), wCond$(0), wHit(0) AS _BYTE 'watch list and watchpoints
+DIM SHARED wCount AS LONG
+REDIM SHARED csProc(0) AS LONG, csLine(0) AS LONG 'call stack: procedure and calling line per depth
+DIM SHARED edTR AS LONG 'text rows on screen
+DIM SHARED edPrevTitle$
 
 'palette slots on the editor's screen (set in edOpenScreen)
 CONST EC_BG = 0, EC_CURLINE = 1, EC_SEL = 2, EC_ERRLINE = 3, EC_BAR = 4, EC_MATCH = 5
 CONST EC_BARTEXT = 6, EC_TEXT = 7, EC_GUTTER = 8, EC_KEYWORD = 9, EC_NUMBER = 10
 CONST EC_STRING = 11, EC_COMMENT = 12, EC_META = 13, EC_LABEL = 14, EC_BRIGHT = 15
-CONST EC_HOTKEY = 16, EC_TRACK = 17, EC_THUMB = 18, EC_THUMBHOT = 19, EC_BUTTON = 20
+CONST EC_HOTKEY = 16, EC_TRACK = 17, EC_THUMB = 18, EC_THUMBHOT = 19, EC_BUTTON = 20, EC_EXECLINE = 21, EC_BPDOT = 22
 
 CONST ED_UNDO_MAX = 300, ED_TAB = 4
 

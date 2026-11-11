@@ -25,6 +25,8 @@ DIM SHARED keyhit AS LONG, screenKeyStatus AS _BYTE
 DIM SHARED running AS _BYTE, loaded AS _BYTE, loadedFile$
 REDIM SHARED hist(0) AS STRING 'lines typed at the prompt (Up/Down)
 DIM SHARED histN AS LONG
+DIM SHARED curTitle$ 'the window title (QB64pe's _TITLE$ returns freed memory, so it's kept here)
+curTitle$ = "basiccmdline"
 DIM SHARED MyBad AS _BYTE, prevListFG AS _UNSIGNED LONG, prevListBG AS _UNSIGNED LONG
 DIM L$, L1$, temp$, saveFile$, k$, i AS LONG, j AS LONG
 DIM q AS STRING * 1
@@ -327,12 +329,17 @@ SUB newProgram (f$)
 END SUB
 
 SUB editProgram
-    'opens the full-screen editor (editor.bm). F5 there runs the program;
-    'when it ends, a key brings the editor back, as in QBasic
+    'opens the full-screen editor (editor.bm). F5 there runs the program,
+    'F7/F8 run it paused at the first line (debug.bm); when it ends, a key
+    'brings the editor back, as in QBasic
+    DIM r AS INTEGER
     DO
-        IF edRun% <> 2 THEN EXIT DO
+        r = edRun%
+        IF r <> ED_RUN AND r <> ED_STEP THEN EXIT DO
+        dbgStart (r = ED_STEP)
         runProgram
-        pressAnyKey
+        dbgActive = false
+        IF dbgStopped = 0 THEN pressAnyKey 'stopping from the debugger goes straight back
     LOOP
 END SUB
 
@@ -349,6 +356,13 @@ SUB pressAnyKey
         _LIMIT 30
     LOOP UNTIL k > 0 AND k < 100000 'any key, but not a modifier on its own
     _KEYCLEAR
+END SUB
+
+SUB setTitle (t$)
+    'sets the window title; _TITLE$ can't be trusted to read it back
+    IF t$ = curTitle$ THEN EXIT SUB
+    curTitle$ = t$
+    _TITLE t$
 END SUB
 
 SUB setSoftKeys (enable AS _BYTE)
@@ -645,4 +659,5 @@ END FUNCTION
 '$include:'stmts.bm'
 '$include:'editor.bm'
 '$include:'editorui.bm'
+'$include:'debug.bm'
 '$include:'lineedit.bm'

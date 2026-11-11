@@ -903,7 +903,7 @@ SUB callBuiltin (nm$, a() AS valType, na AS INTEGER, v AS valType)
         CASE "_windowhasfocus": retN v, _WINDOWHASFOCUS, varTypeLONG
         CASE "_windowhandle": retN v, _WINDOWHANDLE, varType_INTEGER64
         CASE "_os$": retS v, _OS$
-        CASE "_title$": retS v, _TITLE$
+        CASE "_title$": retS v, curTitle$ 'QB64pe's _TITLE$ returns freed memory
         CASE "_clipboard$": retS v, _CLIPBOARD$
         CASE "_clipboardimage": retN v, _CLIPBOARDIMAGE, varTypeLONG
         CASE "_exit": retN v, _EXIT, varTypeLONG

@@ -1,0 +1,36 @@
+.LOAD tests/debug_prog.bas
+Loaded.
+.EDIT
+debug: paused at line 1 
+editor: The program is paused: F5 continues, Esc stops it
+editor: Not inside a SUB or FUNCTION
+debug: paused at line 2 
+debug: paused at line 3 
+debug: paused at line 4 
+ 1  2 
+debug: paused at line 5 
+debug: paused at line 3 
+debug: paused at line 8 
+debug: stack: SUB twice, line 8   <- paused here
+debug: stack: main module, line 3
+debug: paused at line 4 
+ 2  4 
+debug: paused at line 6 - Breakpoint
+debug:   x = 4
+editor: x = 99
+end 99 
+Press any key to continue
+editor: Breakpoints cleared
+debug: paused at line 5 - Watchpoint: x > 3
+debug:   x = 4  (stop when > 3)
+.LIST
+ 1 x = 1
+ 2 FOR i = 1 TO 2
+ 3     twice x
+ 4     PRINT i; x
+ 5 NEXT
+ 6 PRINT "end"; x
+ 7 SUB twice (v)
+ 8     v = v * 2
+ 9 END SUB
+End of file - tests/debug_prog.bas

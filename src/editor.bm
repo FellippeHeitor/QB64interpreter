@@ -6,14 +6,14 @@
 'Nothing is drawn then; status messages are printed instead.
 
 FUNCTION edRun%
-    'returns 1 when closed with Esc, 2 when F5 asks to run the program
-    DIM i AS LONG, k AS LONG, redraw AS _BYTE
-    DIM prevTitle$
+    'returns ED_CLOSE (Esc), ED_RUN (F5) or ED_STEP (F7/F8: run paused)
+    DIM i AS LONG
 
     edN = UBOUND(program)
     IF edN < 1 THEN edN = 1
     REDIM edL(1 TO edN) AS STRING
     FOR i = 1 TO UBOUND(program): edL(i) = program(i): NEXT
+    IF UBOUND(edMark) <> edN THEN REDIM _PRESERVE edMark(1 TO edN) AS _BYTE
 
     edCY = 1: edCX = 1: edTop = 1: edLeft = 0
     IF loadedFile$ = edLastFile$ AND edLastCY <= edN THEN
@@ -26,62 +26,19 @@ FUNCTION edRun%
     IF MID$(edSnap$, 9) <> edLastText$ OR edLastValid = 0 THEN
         edUndoN = 0: edRedoN = 0: edSavedAt = 0
     END IF
+    edCalcGutter
     IF lineThatErrored >= 1 AND lineThatErrored <= edN THEN
         edCY = lineThatErrored: edCX = edFirstNonSpace&(edCY): edErrLine = edCY
         edSetMsg lastErrorMsg$ + " on line" + STR$(edCY)
-        edTop = edCY - (edRows - 2) \ 2
+        edTop = edCY - edTR \ 2
     END IF
     edClampX
     edWantX = edCX
     edEnsureVisible
 
-    IF headless THEN
-        DO
-            k = edGetKey&
-            IF k THEN edHandleKey k
-            IF edScriptEnd THEN edQuit = 1
-        LOOP UNTIL edQuit
-    ELSE
-        prevTitle$ = _TITLE$
-        edPrevScreen = _COPYIMAGE(0)
-        edImg = _NEWIMAGE(edCols * 8, edRows * 16, 32)
-        SCREEN edImg
-        edSetPalette
-        KEY OFF
-        setSoftKeys false
-        _KEYCLEAR
-        _RESIZE ON
-        IF _RESIZE THEN edPointer = 0 'drop a stale event left from the prompt's window
-        edPointer = 0
-        edBlinkT = TIMER
-        edEnsureVisible
-        redraw = -1
-        DO
-            DO
-                k = edGetKey&
-                IF k = 0 THEN EXIT DO
-                edHandleKey k
-                redraw = -1: edBlinkT = TIMER
-                IF edQuit THEN EXIT DO
-            LOOP
-            IF edQuit = 0 THEN
-                IF edMouse%% THEN redraw = -1: edBlinkT = TIMER: IF edMouseDown <> 1 THEN edLeaveLineCheck
-                IF edResized%% THEN redraw = -1
-                IF edBlinkPhase%% <> edBlinkOn THEN redraw = -1
-                IF redraw THEN edDraw: _DISPLAY: redraw = 0
-                _LIMIT 60
-            END IF
-        LOOP UNTIL edQuit
-        _RESIZE OFF
-        _MOUSESHOW "DEFAULT"
-        SCREEN edPrevScreen
-        _FREEIMAGE edImg
-        _TITLE prevTitle$
-        setSoftKeys true
-        IF screenKeyStatus THEN KEY ON
-        _KEYCLEAR
-        _AUTODISPLAY
-    END IF
+    IF NOT headless THEN edScreenOpen _COPYIMAGE(0)
+    edLoop
+    IF NOT headless THEN edScreenClose: _AUTODISPLAY
     edKeyQ$ = ""
     IF edTypedLine THEN edFixIndent edTypedLine: edTypedLine = 0
 
@@ -93,6 +50,65 @@ FUNCTION edRun%
     edLastText$ = MID$(edSnap$, 9): edLastValid = -1
     edRun% = edQuit
 END FUNCTION
+
+SUB edScreenOpen (behind AS LONG)
+    'switches to the editor's screen; behind is the screen F4 shows
+    edPrevTitle$ = curTitle$
+    edPrevScreen = behind
+    edImg = _NEWIMAGE(edCols * 8, edRows * 16, 32)
+    SCREEN edImg
+    KEY OFF
+    setSoftKeys false
+    _KEYCLEAR
+    _RESIZE ON
+    IF _RESIZE THEN edPointer = 0 'drop a stale event left from the other screen
+END SUB
+
+SUB edScreenClose
+    _RESIZE OFF
+    _MOUSESHOW "DEFAULT"
+    SCREEN edPrevScreen
+    _FREEIMAGE edImg
+    setTitle edPrevTitle$
+    setSoftKeys true
+    IF screenKeyStatus THEN KEY ON
+    _KEYCLEAR
+END SUB
+
+SUB edLoop
+    'the editor's main loop, until edQuit is set
+    DIM k AS LONG, redraw AS _BYTE
+    IF headless THEN
+        DO
+            k = edGetKey&
+            IF k THEN edHandleKey k
+            IF edScriptEnd THEN
+                IF dbgPaused THEN edQuit = ED_STOP ELSE edQuit = ED_CLOSE
+            END IF
+        LOOP UNTIL edQuit
+        EXIT SUB
+    END IF
+    edPointer = 0
+    edBlinkT = TIMER
+    edEnsureVisible
+    redraw = -1
+    DO
+        DO
+            k = edGetKey&
+            IF k = 0 THEN EXIT DO
+            edHandleKey k
+            redraw = -1: edBlinkT = TIMER
+            IF edQuit THEN EXIT DO
+        LOOP
+        IF edQuit = 0 THEN
+            IF edMouse%% THEN redraw = -1: edBlinkT = TIMER: IF edMouseDown <> 1 THEN edLeaveLineCheck
+            IF edResized%% THEN redraw = -1
+            IF edBlinkPhase%% <> edBlinkOn THEN redraw = -1
+            IF redraw THEN edDraw: _DISPLAY: redraw = 0
+            _LIMIT 60
+        END IF
+    LOOP UNTIL edQuit
+END SUB
 
 '---------------------------------------------------------------- keys
 FUNCTION edGetKey&
@@ -172,6 +188,8 @@ FUNCTION edScriptKey&
             CASE "space": k = 32
             CASE "lbrace": k = 123
             CASE "f10": k = EK_F10
+            CASE "f11": k = 34048
+            CASE "f12": k = EK_F12
             CASE "menu": k = EK_MENU
             CASE "f1" TO "f9": IF LEN(nm$) = 2 THEN k = EK_F1 + (VAL(MID$(nm$, 2)) - 1) * 256
             CASE ELSE: IF LEN(nm$) = 1 THEN k = ASC(nm$)
@@ -188,6 +206,7 @@ SUB edHandleKey (k AS LONG)
     DIM hadSel AS _BYTE, sy AS LONG, sx AS LONG, ey AS LONG, ex AS LONG, n AS LONG, t$
 
     edMsg$ = ""
+    IF edDebugKey%%(k) THEN edEnsureVisible: EXIT SUB
     IF edAlt AND NOT edCtrl AND ((k >= 65 AND k <= 90) OR (k >= 97 AND k <= 122)) THEN
         IF edMenuForKey%(k) THEN edMenu edMenuForKey%(k) 'Alt+letter opens a menu
         EXIT SUB
@@ -264,9 +283,9 @@ SUB edHandleKey (k AS LONG)
         CASE EK_F1: edHelp
         CASE EK_F3: IF edFind$ = "" THEN edFindPrompt ELSE edFindNext edShift
         CASE EK_F4: edShowOutput
-        CASE EK_F10, EK_MENU: edMenu 1
-        CASE EK_F5: edQuit = 2
-        CASE EK_ESC: edQuit = 1
+        CASE EK_MENU: edMenu 1
+        CASE EK_F5: edQuit = ED_RUN
+        CASE EK_ESC: edQuit = ED_CLOSE
         CASE 32 TO 126, 128 TO 255
             IF edHasSel%% THEN
                 edBeginEdit 0: edDeleteSel: edLastKind = 1
@@ -285,6 +304,59 @@ SUB edHandleKey (k AS LONG)
     edLeaveLineCheck
     edEnsureVisible
 END SUB
+
+FUNCTION edDebugKey%% (k AS LONG)
+    'debugger keys, and what's allowed while the program is paused.
+    'Returns true when the key was dealt with.
+    DIM handled AS _BYTE
+    handled = -1
+    SELECT CASE k
+        CASE EK_F7, EK_F8
+            IF dbgPaused THEN
+                IF k = EK_F7 THEN edQuit = ED_INTO ELSE edQuit = ED_OVER
+            ELSE
+                edQuit = ED_STEP 'start running, paused at the first line
+            END IF
+        CASE EK_F6
+            IF dbgPaused = 0 THEN
+                edSetMsg "F6 steps out of a SUB or FUNCTION while debugging"
+            ELSEIF callDepth = 0 THEN
+                edSetMsg "Not inside a SUB or FUNCTION"
+            ELSE
+                edQuit = ED_OUT
+            END IF
+        CASE EK_F5: IF dbgPaused THEN edQuit = ED_CONTINUE ELSE handled = 0
+        CASE EK_ESC: IF dbgPaused THEN edQuit = ED_STOP ELSE handled = 0
+        CASE EK_F9
+            IF edCtrl THEN dbgToggleMark edCY, MARK_SKIP ELSE dbgToggleMark edCY, MARK_BREAK
+        CASE EK_F10: dbgClearBreakpoints
+        CASE EK_F12: dbgCallStack
+        CASE ELSE
+            handled = 0
+            IF edCtrl AND (k = 119 OR k = 23) THEN dbgVarList: handled = -1 'Ctrl+W
+    END SELECT
+    IF handled OR dbgPaused = 0 THEN edDebugKey%% = handled: EXIT FUNCTION
+
+    'paused: the text can't change
+    SELECT CASE k
+        CASE EK_LEFT, EK_RIGHT, EK_UP, EK_DOWN, EK_HOME, EK_END, EK_PGUP, EK_PGDN
+            IF edAlt THEN handled = -1
+        CASE EK_F1, EK_F3, EK_F4, EK_MENU, EK_INS
+        CASE ELSE
+            IF edCtrl THEN
+                SELECT CASE k
+                    CASE 97, 99, 102, 103, 115 'select all, copy, find, go to, save
+                    CASE ELSE: handled = -1
+                END SELECT
+            ELSEIF edAlt AND ((k >= 65 AND k <= 90) OR (k >= 97 AND k <= 122)) THEN
+                'Alt+letter opens a menu
+            ELSE
+                handled = -1
+            END IF
+    END SELECT
+    IF handled THEN edSetMsg "The program is paused: F5 continues, Esc stops it"
+    edDebugKey%% = handled
+END FUNCTION
 
 SUB edSelectAll
     edSelOn = -1: edSY = 1: edSX = 1
@@ -419,7 +491,7 @@ SUB edNavigate (k AS LONG)
         edSelOn = 0
     END IF
     edLastKind = -1
-    rows = edRows - 2
+    rows = edTR
 
     SELECT CASE k
         CASE EK_LEFT
@@ -535,18 +607,22 @@ SUB edInsertLines (at AS LONG, count AS LONG)
     DIM i AS LONG
     IF count < 1 THEN EXIT SUB
     REDIM _PRESERVE edL(1 TO edN + count) AS STRING
-    FOR i = edN TO at STEP -1: edL(i + count) = edL(i): NEXT
-    FOR i = at TO at + count - 1: edL(i) = "": NEXT
+    IF UBOUND(edMark) < edN THEN REDIM _PRESERVE edMark(1 TO edN) AS _BYTE
+    REDIM _PRESERVE edMark(1 TO edN + count) AS _BYTE
+    FOR i = edN TO at STEP -1: edL(i + count) = edL(i): edMark(i + count) = edMark(i): NEXT
+    FOR i = at TO at + count - 1: edL(i) = "": edMark(i) = 0: NEXT
     edN = edN + count
 END SUB
 
 SUB edRemoveLines (at AS LONG, count AS LONG)
     DIM i AS LONG
     IF count < 1 THEN EXIT SUB
-    FOR i = at + count TO edN: edL(i - count) = edL(i): NEXT
+    IF UBOUND(edMark) < edN THEN REDIM _PRESERVE edMark(1 TO edN) AS _BYTE
+    FOR i = at + count TO edN: edL(i - count) = edL(i): edMark(i - count) = edMark(i): NEXT
     edN = edN - count
-    IF edN < 1 THEN edN = 1: edL(1) = ""
+    IF edN < 1 THEN edN = 1: edL(1) = "": edMark(1) = 0
     REDIM _PRESERVE edL(1 TO edN) AS STRING
+    REDIM _PRESERVE edMark(1 TO edN) AS _BYTE
 END SUB
 
 SUB edInsertText (text$)
@@ -651,6 +727,7 @@ SUB edRestore (s$)
     NEXT
     edN = n
     REDIM edL(1 TO edN) AS STRING
+    REDIM _PRESERVE edMark(1 TO edN) AS _BYTE
     a = 9: n = 0
     DO
         n = n + 1
@@ -705,8 +782,9 @@ SUB edRedoStep
 END SUB
 
 SUB edForget
-    'a different program was loaded: drop the undo history
+    'a different program was loaded: drop the undo history and line marks
     edLastValid = 0: edLastFile$ = "": edLastCY = 1: edLastCX = 1: edLastTop = 1
+    REDIM edMark(1 TO 1) AS _BYTE
 END SUB
 
 FUNCTION edModified%%
@@ -979,7 +1057,7 @@ SUB edGotoPrompt
     IF n > edN THEN n = edN
     edSelOn = 0: edLastKind = -1
     edCY = n: edCX = edFirstNonSpace&(n): edWantX = edCX
-    IF edCY < edTop OR edCY >= edTop + edRows - 2 THEN edTop = edCY - (edRows - 2) \ 2
+    IF edCY < edTop OR edCY >= edTop + edTR THEN edTop = edCY - edTR \ 2
     edEnsureVisible
 END SUB
 
@@ -1017,7 +1095,7 @@ END SUB
 '---------------------------------------------------------------- mouse
 FUNCTION edMouse%%
     DIM wheel AS LONG, b AS _BYTE, changed AS _BYTE, rows AS LONG
-    rows = edRows - 2
+    rows = edTR
     DO WHILE _MOUSEINPUT
         wheel = wheel + _MOUSEWHEEL
         b = _MOUSEBUTTON(1)
@@ -1029,9 +1107,12 @@ FUNCTION edMouse%%
             IF edMouseY = 1 THEN
                 IF edMenuAt%(edMouseX) THEN edMenu edMenuAt%(edMouseX): edMouse%% = -1: EXIT FUNCTION
                 edMouseDown = 2
-            ELSEIF edMouseY <= edRows - 1 AND edMouseX >= edCols THEN
+            ELSEIF edMouseY <= edTR + 1 AND edMouseX >= edCols THEN
                 edScrollClick
-            ELSEIF edMouseY <= edRows - 1 THEN
+            ELSEIF edMouseY <= edTR + 1 AND edMouseX <= edGW THEN
+                edGutterClick
+                edMouseDown = 2
+            ELSEIF edMouseY <= edTR + 1 THEN
                 edMouseClick
                 edMouseDown = 1
             ELSE
@@ -1048,12 +1129,12 @@ FUNCTION edMouse%%
     'the scroll bar's arrows or track
     IF edMouseDown = 1 THEN
         IF edMouseY < 2 AND edTop > 1 THEN edTop = edTop - 1: edMouseDrag: changed = -1
-        IF edMouseY > edRows - 1 AND edTop + rows - 1 < edN THEN edTop = edTop + 1: edMouseDrag: changed = -1
+        IF edMouseY > edTR + 1 AND edTop + rows - 1 < edN THEN edTop = edTop + 1: edMouseDrag: changed = -1
     END IF
     IF edMouseDown = 4 AND TIMER >= edRepT THEN edScrollBy edRepDir: edRepT = TIMER + .05: changed = -1
     IF wheel THEN edScrollBy wheel * 3: changed = -1
     'I-beam over the text, arrow elsewhere
-    IF edMouseY >= 2 AND edMouseY <= edRows - 1 AND edMouseX > edGW AND edMouseX < edCols THEN
+    IF edMouseY >= 2 AND edMouseY <= edTR + 1 AND edMouseX > edGW AND edMouseX < edCols THEN
         IF edPointer <> 1 THEN _MOUSESHOW "TEXT": edPointer = 1
     ELSE
         IF edPointer <> 2 THEN _MOUSESHOW "DEFAULT": edPointer = 2
@@ -1065,7 +1146,7 @@ SUB edMouseToText (y AS LONG, x AS LONG)
     DIM my AS LONG
     my = edMouseY
     IF my < 2 THEN my = 2
-    IF my > edRows - 1 THEN my = edRows - 1
+    IF my > edTR + 1 THEN my = edTR + 1
     y = edTop + my - 2
     IF y > edN THEN y = edN
     x = edLeft + edMouseX - edGW
@@ -1078,10 +1159,7 @@ SUB edMouseClick
     DIM y AS LONG, x AS LONG
     edMouseToText y, x
     edLastKind = -1: edMsg$ = ""
-    IF edMouseX <= edGW THEN 'gutter: select the line
-        edSelOn = -1: edSY = y: edSX = 1
-        IF y < edN THEN edCY = y + 1: edCX = 1 ELSE edCY = y: edCX = LEN(edL(y)) + 1
-    ELSEIF TIMER - edClickT < .4 AND TIMER >= edClickT AND y = edClickY AND x = edClickX THEN
+    IF TIMER - edClickT < .4 AND TIMER >= edClickT AND y = edClickY AND x = edClickX THEN
         'double-click: select the word
         edCY = y: edCX = x
         edWordAt
@@ -1096,6 +1174,16 @@ SUB edMouseClick
         edClickT = TIMER: edClickY = y: edClickX = x
     END IF
     edWantX = edCX
+END SUB
+
+SUB edGutterClick
+    'a click on a line number sets or clears a breakpoint there;
+    'Shift+click marks the line to be skipped
+    DIM y AS LONG
+    edMsg$ = ""
+    y = edTop + edMouseY - 2
+    IF y < 1 OR y > edN THEN EXIT SUB
+    IF _KEYDOWN(100303) OR _KEYDOWN(100304) THEN dbgToggleMark y, MARK_SKIP ELSE dbgToggleMark y, MARK_BREAK
 END SUB
 
 SUB edMouseDrag
@@ -1186,6 +1274,18 @@ SUB edSetPalette
     edPal(EC_THUMB) = _RGB32(120, 135, 185)
     edPal(EC_THUMBHOT) = _RGB32(190, 200, 235)
     edPal(EC_BUTTON) = _RGB32(90, 100, 135)
+    edPal(EC_EXECLINE) = _RGB32(85, 70, 0)
+    edPal(EC_BPDOT) = _RGB32(230, 40, 40)
+END SUB
+
+SUB edDot (row AS LONG)
+    'a breakpoint: a red dot in the gutter's first column
+    DIM cx AS LONG, cy AS LONG, dy AS LONG, dx AS LONG
+    cx = 4: cy = (row - 1) * 16 + 8
+    FOR dy = -3 TO 3
+        dx = INT(SQR(10 - dy * dy))
+        LINE (cx - dx, cy + dy)-(cx + dx, cy + dy), edPal(EC_BPDOT)
+    NEXT
 END SUB
 
 SUB edColor (fg AS INTEGER, bg AS INTEGER)
@@ -1228,14 +1328,18 @@ FUNCTION edResized%%
 END FUNCTION
 
 SUB edCalcGutter
-    edGW = LEN(_TRIM$(STR$(edN))) + 2
-    IF edGW < 5 THEN edGW = 5
+    'gutter: breakpoint/skip mark, line number, execution arrow, space
+    edGW = LEN(_TRIM$(STR$(edN)))
+    IF edGW < 3 THEN edGW = 3
+    edGW = edGW + 3
+    edTR = edRows - 2 - dbgPanelRows%
+    IF edTR < 1 THEN edTR = 1
 END SUB
 
 SUB edEnsureVisible
     DIM rows AS LONG, tw AS LONG
     edCalcGutter
-    rows = edRows - 2: tw = edCols - edGW - 1
+    rows = edTR: tw = edCols - edGW - 1
     IF edCY < edTop THEN edTop = edCY
     IF edCY > edTop + rows - 1 THEN edTop = edCY - rows + 1
     IF edTop > edN THEN edTop = edN
@@ -1328,10 +1432,10 @@ SUB edDraw
     IF f$ = "" THEN f$ = "Untitled"
     f$ = MID$(f$, _INSTRREV(f$, "/") + 1)
     IF edModified%% THEN f$ = f$ + " *"
-    _TITLE "Editing " + f$
+    IF dbgPaused THEN setTitle "Debugging " + f$ + " - paused at line" + STR$(dbgExecLine) ELSE setTitle "Editing " + f$
     edDrawMenuBar 0
 
-    FOR r = 2 TO edRows - 1
+    FOR r = 2 TO edTR + 1
         y = edTop + r - 2
         IF y > edN THEN
             edColor EC_GUTTER, EC_BG
@@ -1340,9 +1444,15 @@ SUB edDraw
         END IF
         lineBg = EC_BG
         IF y = edErrLine THEN lineBg = EC_ERRLINE ELSE IF y = edCY THEN lineBg = EC_CURLINE
+        IF dbgPaused AND y = dbgExecLine THEN lineBg = EC_EXECLINE
         t$ = _TRIM$(STR$(y))
         IF y = edCY THEN edColor EC_BRIGHT, EC_BG ELSE edColor EC_GUTTER, EC_BG
         edPut 1, r, SPACE$(edGW - 2 - LEN(t$)) + t$ + "  "
+        IF y <= UBOUND(edMark) THEN
+            IF edMark(y) AND MARK_BREAK THEN edDot r
+            IF edMark(y) AND MARK_SKIP THEN edColor EC_STRING, EC_BG: edPut 1, r, "!"
+        END IF
+        IF dbgPaused AND y = dbgExecLine THEN edColor EC_LABEL, EC_BG: edPut edGW - 1, r, CHR$(16)
 
         s$ = edL(y)
         c$ = edColors$(s$)
@@ -1385,6 +1495,7 @@ SUB edDraw
         IF edLeft > 0 THEN edColor EC_GUTTER, EC_BG: edPut edGW, r, CHR$(17)
     NEXT
     edDrawScrollbar
+    IF edTR + 2 < edRows THEN dbgDrawPanel edTR + 2, edRows - edTR - 2
 
     'status bar
     rt$ = "Ln " + _TRIM$(STR$(edCY)) + "/" + _TRIM$(STR$(edN)) + "  Col " + _TRIM$(STR$(edCX)) + "  "
@@ -1395,7 +1506,11 @@ SUB edDraw
     ELSE
         'as many key hints as fit
         t$ = ""
-        f$ = "F10 Menu|^S Save|F5 Run|F4 Output|^F Find|Esc Close|^Z Undo|"
+        IF dbgPaused THEN
+            f$ = "F5 Continue|F7 Step|F8 Step Over|F6 Step Out|F9 Breakpoint|^W Variables|Esc Stop|"
+        ELSE
+            f$ = "Alt Menu|^S Save|F5 Run|F8 Step|F9 Breakpoint|F4 Output|Esc Close|"
+        END IF
         DO WHILE LEN(f$)
             i = INSTR(f$, "|")
             IF LEN(t$) + i + 2 > edCols - LEN(rt$) THEN EXIT DO
@@ -1413,7 +1528,7 @@ SUB edDraw
     'cursor: a blinking bar (a block when overwriting)
     edBlinkOn = edBlinkPhase%%
     y = edCY - edTop + 2: x = edCX - edLeft + edGW
-    IF edBlinkOn AND edModal = 0 AND y >= 2 AND y <= edRows - 1 AND x > edGW AND x < edCols THEN
+    IF edBlinkOn AND edModal = 0 AND dbgPaused = 0 AND y >= 2 AND y <= edTR + 1 AND x > edGW AND x < edCols THEN
         IF edIns THEN
             edBar x, y, EC_BRIGHT
         ELSE
