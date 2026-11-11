@@ -302,6 +302,8 @@ SUB edUiStart
     edModal = edModal + 1
     IF headless THEN EXIT SUB
     edUiPrevB = _MOUSEBUTTON(1)
+    edUiFldN = 0
+    edUiPointer
 END SUB
 
 SUB edUiEnd
@@ -309,6 +311,22 @@ SUB edUiEnd
     edModal = edModal - 1
     IF headless THEN EXIT SUB
     IF edUiPrevB THEN edMouseDown = 2
+    edUiFldN = 0
+    IF edModal > 0 THEN edUiPointer
+END SUB
+
+SUB edUiPointer
+    'I-beam over a dialog's text fields, arrow elsewhere in menus and dialogs
+    DIM i AS INTEGER, onField AS _BYTE
+    IF headless THEN EXIT SUB
+    FOR i = 1 TO edUiFldN
+        IF edMouseY = edUiFldY + 2 * (i - 1) AND edMouseX >= edUiFldX AND edMouseX < edUiFldX + edUiFldW THEN onField = -1
+    NEXT
+    IF onField THEN
+        IF edPointer <> 1 THEN _MOUSESHOW "TEXT": edPointer = 1
+    ELSE
+        IF edPointer <> 2 THEN _MOUSESHOW "DEFAULT": edPointer = 2
+    END IF
 END SUB
 
 FUNCTION edUiWait&
@@ -341,6 +359,7 @@ FUNCTION edUiWait&
             END IF
             IF x <> edMouseX OR y <> edMouseY THEN
                 edMouseX = x: edMouseY = y
+                edUiPointer
                 IF edUiHover THEN edUiWait& = -3: EXIT FUNCTION
             END IF
         LOOP
@@ -521,6 +540,8 @@ FUNCTION edDialog% (title$, n AS INTEGER, labels$(), vals$())
         fx = lft + 3 + lw: fw = lft + w - 3 - fx + 1
         by = top + h - 3
         edLayoutButtons b$(), 2, lft, w, bx()
+        edUiFldN = n: edUiFldX = fx: edUiFldY = top + 2: edUiFldW = fw
+        edUiPointer
         IF NOT headless THEN
             edDraw
             edBox lft, top, w, h, title$

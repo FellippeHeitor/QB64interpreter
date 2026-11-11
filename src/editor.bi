@@ -48,6 +48,7 @@ DIM SHARED edKeyQ$, edScriptEnd AS _BYTE, edClip$, edClipLine$
 DIM SHARED edPromptCancel AS _BYTE, edMouseY AS LONG, edMouseX AS LONG, edMousePY AS LONG
 DIM SHARED edMouseDown AS INTEGER '1 selecting, 2 ignore until released, 3 scroll thumb, 4 scroll repeat
 DIM SHARED edModal AS INTEGER, edUiHover AS _BYTE, edUiBlink AS _BYTE 'a menu or dialog is open
+DIM SHARED edUiFldN AS INTEGER, edUiFldX AS LONG, edUiFldY AS LONG, edUiFldW AS LONG 'a dialog's text fields, one every other row
 DIM SHARED edRepDir AS LONG, edRepT AS DOUBLE, edThumbOfs AS LONG, edUiPrevB AS _BYTE, edAltAlone AS _BYTE
 DIM SHARED edClickT AS DOUBLE, edClickY AS LONG, edClickX AS LONG
 DIM SHARED edLastFile$, edLastCY AS LONG, edLastCX AS LONG, edLastTop AS LONG
